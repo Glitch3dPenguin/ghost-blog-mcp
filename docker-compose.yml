@@ -1,0 +1,18 @@
+services:
+  ghost-blog-mcp:
+    image: ghcr.io/glitch3dpenguin/ghost-blog-mcp:latest
+    container_name: ghost-blog-mcp
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Ghost site + API credentials
+      GHOST_URL: "https://your-ghost-site.example"
+      GHOST_ADMIN_KEY: "<key id>:<64-char-hex-secret>"
+      # Optional: content key (read-only mode when no admin key is set)
+      GHOST_CONTENT_KEY: ""
+
+      # Transport — streamable-http recommended for container deployments.
+      # Options: streamable-http | sse | stdio
+      MCP_TRANSPORT: "streamable-http"
+      PORT: "8000"
