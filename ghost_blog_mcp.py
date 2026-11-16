@@ -477,18 +477,21 @@ def list_posts(
     return "\n".join(lines)
 
 
-_ID_RE = re.compile(r"^(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
-                    r"[0-9a-f]{4}-[0-9a-f]{12})$", re.IGNORECASE)
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                      r"[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
 
 def _fetch_item(base, kind, identifier, admin):
     """Fetch one post/page by UUID, numeric id, or slug. Ghost 6 path
-    params accept ids only, so slugs are resolved via a ?filter=slug:
-    query on the list endpoint."""
-    if _ID_RE.match(identifier):
+    params only accept raw numeric ids (24-hex); UUIDs and slugs are
+    resolved via ?filter= queries on the list endpoint."""
+    if _UUID_RE.match(identifier):
+        return _api_get(f"{base}/{kind}/",
+                        params={"filter": f"uuid:{identifier}"}, admin=admin)
+    if re.fullmatch(r"[0-9a-f]+", identifier, flags=re.IGNORECASE):
         return _api_get(f"{base}/{kind}/{identifier}/", admin=admin)
-    return _api_get(f"{base}/{kind}/", params={"filter": f"slug:{identifier}"},
-                    admin=admin)
+    return _api_get(f"{base}/{kind}/",
+                    params={"filter": f"slug:{identifier}"}, admin=admin)
 
 
 @mcp.tool()
