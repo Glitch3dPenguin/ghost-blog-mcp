@@ -456,8 +456,8 @@ def list_posts(
     if filter_str:
         lines[0] += f"  [filter: {filter_str}]"
     lines += ["",
-              f"{'Date':<11}  {'Status':<10}  {'Title':<52}  {'Tags':<22}  Author",
-              "-" * 116]
+              f"{'Date':<11}  {'Status':<10}  {'Title':<52}  {'Slug':<40}  {'Tags':<22}  Author",
+              "-" * 158]
     for p in posts:
         date  = str(p.get("published_at") or p.get("created_at") or "?")[:10]
         title = p.get("title") or "(untitled)"
@@ -467,13 +467,28 @@ def list_posts(
         if len(tags) > 20:
             tags = tags[:17] + "..."
         authors = _author_names(p.get("authors"))
+        slug = (p.get("slug") or "")[:38]
         lines.append(f"{date:<11}  {str(p.get('status', '?')):<10}  {title:<52}  "
-                     f"{tags:<22}  {authors}")
-    lines += ["", "Use get_post(<id-or-slug>) for metadata, "
-              "get_post_content(<id-or-slug>) for the full body."]
+                     f"{slug:<40}  {tags:<22}  {authors}")
+    lines += ["", "Use get_post(<slug>) for metadata + preview, "
+              "get_post_content(<slug>) for the full body."]
     if pag.get("page_count", 1) > page:
         lines.append(f"Use list_posts(page={page + 1}) for the next page.")
     return "\n".join(lines)
+
+
+_ID_RE = re.compile(r"^(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                    r"[0-9a-f]{4}-[0-9a-f]{12})$", re.IGNORECASE)
+
+
+def _fetch_item(base, kind, identifier, admin):
+    """Fetch one post/page by UUID, numeric id, or slug. Ghost 6 path
+    params accept ids only, so slugs are resolved via a ?filter=slug:
+    query on the list endpoint."""
+    if _ID_RE.match(identifier):
+        return _api_get(f"{base}/{kind}/{identifier}/", admin=admin)
+    return _api_get(f"{base}/{kind}/", params={"filter": f"slug:{identifier}"},
+                    admin=admin)
 
 
 @mcp.tool()
@@ -491,7 +506,7 @@ def get_post(identifier: str, chars: int = 1500) -> str:
     chars = max(200, int(chars))
     admin = _mode() == "admin"
     base  = ADMIN_BASE if admin else CONTENT_BASE
-    ok, data = _api_get(f"{base}/posts/{identifier}/", admin=admin)
+    ok, data = _fetch_item(base, "posts", identifier, admin)
     if not ok:
         return f"Error looking up post '{identifier}': {data}"
     post = _first_item(data, "posts")
@@ -538,7 +553,7 @@ def get_post_content(identifier: str, format: str = "lexical") -> str:
         return "Invalid format. Use 'lexical' or 'html'."
     admin = _mode() == "admin"
     base  = ADMIN_BASE if admin else CONTENT_BASE
-    ok, data = _api_get(f"{base}/posts/{identifier}/", admin=admin)
+    ok, data = _fetch_item(base, "posts", identifier, admin)
     if not ok:
         return f"Error looking up post '{identifier}': {data}"
     post = _first_item(data, "posts")
@@ -604,8 +619,8 @@ def list_pages(
     if filter_str:
         lines[0] += f"  [filter: {filter_str}]"
     lines += ["",
-              f"{'Updated':<11}  {'Status':<10}  {'Title':<52}  {'Tags':<22}  Author",
-              "-" * 116]
+              f"{'Updated':<11}  {'Status':<10}  {'Title':<52}  {'Slug':<40}  {'Tags':<22}  Author",
+              "-" * 158]
     for p in pages:
         date  = str(p.get("updated_at") or p.get("created_at") or "?")[:10]
         title = p.get("title") or "(untitled)"
@@ -615,9 +630,10 @@ def list_pages(
         if len(tags) > 20:
             tags = tags[:17] + "..."
         authors = _author_names(p.get("authors"))
+        slug = (p.get("slug") or "")[:38]
         lines.append(f"{date:<11}  {str(p.get('status', '?')):<10}  {title:<52}  "
-                     f"{tags:<22}  {authors}")
-    lines += ["", "Use get_page(<id-or-slug>) for metadata + a truncated body preview."]
+                     f"{slug:<40}  {tags:<22}  {authors}")
+    lines += ["", "Use get_page(<slug>) for metadata + a truncated body preview."]
     if pag.get("page_count", 1) > page:
         lines.append(f"Use list_pages(page={page + 1}) for the next page.")
     return "\n".join(lines)
@@ -635,7 +651,7 @@ def get_page(identifier: str, chars: int = 1500) -> str:
     chars = max(200, int(chars))
     admin = _mode() == "admin"
     base  = ADMIN_BASE if admin else CONTENT_BASE
-    ok, data = _api_get(f"{base}/pages/{identifier}/", admin=admin)
+    ok, data = _fetch_item(base, "pages", identifier, admin)
     if not ok:
         return f"Error looking up page '{identifier}': {data}"
     post = _first_item(data, "pages")
