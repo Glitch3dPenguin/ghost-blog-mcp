@@ -32,8 +32,19 @@ logging.getLogger("starlette.requests").setLevel(logging.WARNING)
 # Server init
 # ---------------------------------------------------------------------------
 _transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
-_host      = "0.0.0.0" if _transport in ("streamable-http", "sse") else "127.0.0.1"
-_port      = int(os.getenv("PORT", "8000"))
+# HTTP transports bind loopback by default. Binding a non-loopback address is
+# opt-in (HOST) and REQUIRES MCP_AUTH_TOKEN — the endpoint fronts a Ghost
+# admin key, so an unauthenticated network-facing server is refused at start.
+_auth_token = (os.getenv("MCP_AUTH_TOKEN") or "").strip()
+_host = ((os.getenv("HOST", "127.0.0.1").strip().lower())
+         if _transport in ("streamable-http", "sse") else "127.0.0.1")
+_port = int(os.getenv("PORT", "8000"))
+_loopback = _host in ("127.0.0.1", "localhost", "::1")
+if not _loopback and not _auth_token:
+    raise SystemExit(
+        "refusing to start: a non-loopback bind (%s) requires MCP_AUTH_TOKEN "
+        "(set HOST=127.0.0.1 for local-only use, or set the token to protect "
+        "the exposed endpoint)" % _host)
 
 mcp = FastMCP(
     "GhostBlog",
@@ -1222,5 +1233,39 @@ def delete_tag(tag_id: str) -> str:
 # ===========================================================================
 # Entry point
 # ===========================================================================
+def _token_auth(app):
+    """ASGI wrapper enforcing `Authorization: Bearer <MCP_AUTH_TOKEN>` on
+    every HTTP request. Installed only when a token is configured."""
+    expected = ("Bearer " + _auth_token).encode()
+
+    async def _reject(send):
+        body = json.dumps({"error": "unauthorized"}).encode()
+        await send({"type": "http.response.start", "status": 401,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length",
+                                 str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
+
+    async def wrapped(scope, receive, send):
+        if scope["type"] == "http":
+            supplied = next((v for k, v in scope.get("headers", [])
+                             if k == b"authorization"), b"")
+            if supplied != expected:
+                await _reject(send)
+                return
+        await app(scope, receive, send)
+
+    return wrapped
+
+
 if __name__ == "__main__":
-    mcp.run(transport=_transport)
+    if _transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        import uvicorn
+
+        app = (mcp.streamable_http_app() if _transport == "streamable-http"
+               else mcp.sse_app())
+        if _auth_token:
+            app = _token_auth(app)
+        uvicorn.run(app, host=_host, port=_port, log_level="info")

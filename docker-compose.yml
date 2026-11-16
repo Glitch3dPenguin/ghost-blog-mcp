@@ -3,16 +3,16 @@ services:
     image: ghcr.io/glitch3dpenguin/ghost-blog-mcp:latest
     container_name: ghost-blog-mcp
     restart: unless-stopped
+    # Loopback-only by default: the endpoint fronts a Ghost admin key. To
+    # expose it beyond localhost, set HOST + MCP_AUTH_TOKEN in .env
+    # (non-loopback binds are refused without a token) and put a reverse
+    # proxy with its own auth in front.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - .env
     environment:
-      # Ghost site + API credentials
-      GHOST_URL: "https://your-ghost-site.example"
-      GHOST_ADMIN_KEY: "<key id>:<64-char-hex-secret>"
-      # Optional: content key (read-only mode when no admin key is set)
-      GHOST_CONTENT_KEY: ""
-
-      # Transport — streamable-http recommended for container deployments.
+      # Transport: streamable-http recommended for container deployments.
       # Options: streamable-http | sse | stdio
       MCP_TRANSPORT: "streamable-http"
       PORT: "8000"

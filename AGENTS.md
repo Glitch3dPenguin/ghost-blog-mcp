@@ -27,14 +27,22 @@ build/verify steps, conventions, API gotchas, deployment, and the changelog.
   - `GHOST_URL` (e.g. `https://klabsdev.com`; a trailing `/` is stripped in code)
   - `GHOST_ADMIN_KEY` (format `<key id>:<64-char-hex-secret>`, created under Ghost admin → Integrations → Admin API)
   - Optional: `GHOST_CONTENT_KEY` (Content API; read-only mode when no admin key is set)
-  - Optional: `MCP_TRANSPORT` (`stdio` default | `streamable-http` | `sse`), `PORT` (default `8000`)
+  - Optional: `MCP_TRANSPORT` (`stdio` default | `streamable-http` | `sse`),
+    `PORT` (default `8000`)
+  - Optional: `HOST` (HTTP bind address, default `127.0.0.1`) and
+    `MCP_AUTH_TOKEN` (bearer token — required when `HOST` is non-loopback;
+    the server refuses to start otherwise)
 - There is no build step and no lockfile in the repo.
 
 ## Running the server
 
 - Local: `GHOST_URL=... GHOST_ADMIN_KEY=... python ghost_blog_mcp.py`
   (defaults to `stdio`, which is how AI clients launch it)
-- HTTP transports bind `0.0.0.0`; stdio binds `127.0.0.1`.
+- HTTP transports bind `127.0.0.1` by default. `HOST` opts in to another
+  address, and a non-loopback bind then REQUIRES `MCP_AUTH_TOKEN` — the module
+  raises `SystemExit` at start when it is missing (fail-closed). With a
+  token set, the `_token_auth` ASGI wrapper answers `401` to any request
+  without `Authorization: Bearer <token>`; stdio binds `127.0.0.1`.
 - Endpoints: Streamable HTTP is served at the **root** path `/` (not FastMCP's default
   `/mcp`) and SSE at `/sse`. `streamable_http_path` and `sse_path` are set in the
   `FastMCP(...)` constructor — do not "fix" them back to defaults.
@@ -67,6 +75,15 @@ workspace root, with the repo in `ghost-blog-mcp/`):
    `hmac.new(bytes.fromhex(<fake secret>), "<h>.<p>".encode(), "sha256")`.
 5. `grep -ri "a""sh" ghost-blog-mcp/` — must return 0 matches (the token is split
    across string literals on this line so this file does not trip its own gate).
+   (A working clone also matches in `.git/` — the local reflog hostname — and
+   can match random bytes in binary assets; gate the tracked tree:
+   `git grep -ri "a""sh"` should return nothing in text files.)
+6. Auth smoke (when touching the entry point or `_token_auth`): start
+   with `MCP_TRANSPORT=streamable-http PORT=8991 MCP_AUTH_TOKEN=<fake>
+   GHOST_URL=... GHOST_ADMIN_KEY=<fake>` -> an MCP client without the
+   token gets `401`; with `Authorization: Bearer <fake>` it lists all 18
+   tools. Then `HOST=0.0.0.0` with no token -> the process exits at
+   start with the refusal message.
 
 The only CI is `.github/workflows/docker-publish.yml` (image build/publish on push
 to `main` and on release) — it does not run any tests, so a broken module is only
@@ -190,6 +207,12 @@ Recommended workflow:
 - **New:** Read-only mode with `GHOST_CONTENT_KEY` alone; write tools require `GHOST_ADMIN_KEY`.
 - **New:** `get_post_content` — full body on demand (Lexical parsed to readable text, or raw HTML).
 - **Docs:** README + AGENTS.md, Dockerfile, docker-compose, GHCR publish workflow.
+- **Security:** bearer-token auth for the MCP HTTP surface — `MCP_AUTH_TOKEN`
+  is enforced on every request when set; HTTP transports now bind
+  `127.0.0.1` by default, and a non-loopback `HOST` requires the token
+  (the server refuses to start without it). The compose example
+  publishes `127.0.0.1:8000:8000` and reads credentials from `.env`
+  (`env_file`).
 
 ## Commit and PR guidelines
 
@@ -209,3 +232,6 @@ Recommended workflow:
   must not echo request URLs with params.
 - Write tools have real side effects on a live blog — treat them as
   production-affecting and keep the confirm-before-write contract in docstrings.
+- The MCP HTTP surface is loopback-only by default; exposing it
+  requires `HOST` + `MCP_AUTH_TOKEN` (fail-closed at start) and a
+  reverse proxy with its own auth when it leaves the network.

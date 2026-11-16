@@ -88,17 +88,23 @@ services:
     image: ghcr.io/glitch3dpenguin/ghost-blog-mcp:latest
     container_name: ghost-blog-mcp
     restart: unless-stopped
+    # Loopback-only by default: the endpoint fronts a Ghost admin key. To
+    # expose it beyond localhost, set HOST + MCP_AUTH_TOKEN in .env
+    # (non-loopback binds are refused without a token) and put a reverse
+    # proxy with its own auth in front.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - .env
     environment:
-      GHOST_URL: "https://your-ghost-site.example"
-      GHOST_ADMIN_KEY: "<key id>:<64-char-hex-secret>"
-      GHOST_CONTENT_KEY: "optional_content_key"
+      # Transport: streamable-http recommended for container deployments.
+      # Options: streamable-http | sse | stdio
       MCP_TRANSPORT: "streamable-http"
       PORT: "8000"
 ```
 
 ```sh
+cp .env.example .env   # then fill in GHOST_URL / GHOST_ADMIN_KEY
 docker compose up -d
 ```
 
@@ -130,6 +136,21 @@ In `claude_desktop_config.json`:
     "ghost-blog": {
       "type": "http",
       "url": "http://<your-server-ip>:8000/"
+    }
+  }
+}
+```
+
+When `MCP_AUTH_TOKEN` is set, clients must send the bearer header:
+```json
+{
+  "mcpServers": {
+    "ghost-blog": {
+      "type": "http",
+      "url": "http://<your-server-ip>:8000/",
+      "headers": {
+        "Authorization": "Bearer <MCP_AUTH_TOKEN>"
+      }
     }
   }
 }
@@ -178,6 +199,31 @@ In `claude_desktop_config.json` (or equivalent):
 
 ---
 
+## Security
+
+The MCP endpoint fronts a **Ghost admin key** — full read/write
+access to a live blog. Treat the endpoint like an admin panel:
+
+- **Loopback by default.** The HTTP transports bind `127.0.0.1`, and the
+  container example publishes `127.0.0.1:8000:8000`. Nothing is
+  reachable off-machine out of the box.
+- **Token-gated exposure.** Set `HOST` to bind another address (e.g.
+  `0.0.0.0` for LAN or reverse-proxy use). A non-loopback bind
+  **requires** `MCP_AUTH_TOKEN` — without a token the server refuses to start
+  (fail-closed). With a token set, every HTTP request must carry
+  `Authorization: Bearer <MCP_AUTH_TOKEN>` or it gets a `401`.
+- **Exposing it publicly?** The bearer token protects the MCP surface,
+  but if the endpoint leaves your network, put a reverse proxy with TLS
+  **and** its own authentication in front, and rotate the token like a
+  password.
+- **Credentials in `.env`.** The compose example reads `env_file: .env`
+  (gitignored). Never commit real keys to the compose file or the repo.
+- **No key leakage.** Keys are never logged or echoed, and error output
+  never includes request URLs with query params (the Content API key
+  rides in the query string).
+
+---
+
 ## Environment Variables
 
 | Variable | Required | Description |
@@ -187,6 +233,13 @@ In `claude_desktop_config.json` (or equivalent):
 | `GHOST_CONTENT_KEY` | — | Content API key, from Ghost admin → Integrations → Content API. With no admin key set, the server runs in **read-only mode**. Never logged. |
 | `MCP_TRANSPORT` | — | `streamable-http`, `sse`, or `stdio` (default: `stdio`) |
 | `PORT` | — | Port to bind on for HTTP transports (default: `8000`) |
+| `HOST` | — | Address to bind for HTTP transports (default: `127.0.0.1`).
+  A non-loopback value **requires** `MCP_AUTH_TOKEN`; the server refuses to
+  start otherwise. |
+| `MCP_AUTH_TOKEN` | required with non-loopback `HOST` | Bearer token
+  enforced on the MCP HTTP surface (`Authorization: Bearer ...`). A
+  loopback bind works without one, but then the endpoint is
+  unauthenticated — keep it loopback-only. Never logged. |
 
 **Auth modes:** admin key set → full mode (reads and writes via the Admin API) · only a content key →
 read-only mode (reads via the Content API) · neither → `check_connection` reports a configuration problem
