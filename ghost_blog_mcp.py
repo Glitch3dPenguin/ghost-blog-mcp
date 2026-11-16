@@ -591,7 +591,8 @@ async def get_post(identifier: str, chars: int = 1500) -> str:
     chars = max(200, int(chars))
     admin = _mode() == "admin"
     base  = ADMIN_BASE if admin else CONTENT_BASE
-    ok, data = await _fetch_item(base, "posts", identifier, admin)
+    ok, data = await _fetch_item(base, "posts", identifier, admin,
+                                  formats="html" if admin else None)
     if not ok:
         return f"Error looking up post '{identifier}': {data}"
     post = _first_item(data, "posts")
@@ -638,7 +639,8 @@ async def get_post_content(identifier: str, format: str = "lexical") -> str:
         return "Invalid format. Use 'lexical' or 'html'."
     admin = _mode() == "admin"
     base  = ADMIN_BASE if admin else CONTENT_BASE
-    ok, data = await _fetch_item(base, "posts", identifier, admin)
+    ok, data = await _fetch_item(base, "posts", identifier, admin,
+                                  formats="html" if format == "html" else None)
     if not ok:
         return f"Error looking up post '{identifier}': {data}"
     post = _first_item(data, "posts")
@@ -736,7 +738,8 @@ async def get_page(identifier: str, chars: int = 1500) -> str:
     chars = max(200, int(chars))
     admin = _mode() == "admin"
     base  = ADMIN_BASE if admin else CONTENT_BASE
-    ok, data = await _fetch_item(base, "pages", identifier, admin)
+    ok, data = await _fetch_item(base, "pages", identifier, admin,
+                                  formats="html" if admin else None)
     if not ok:
         return f"Error looking up page '{identifier}': {data}"
     post = _first_item(data, "pages")
