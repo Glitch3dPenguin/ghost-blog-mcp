@@ -494,6 +494,23 @@ def _fetch_item(base, kind, identifier, admin):
                     params={"filter": f"slug:{identifier}"}, admin=admin)
 
 
+def _resolve_raw_id(kind: str, identifier: str):
+    """Resolve a post/page identifier to the RAW ObjectID that Ghost 6 path
+    params require. Raw 24-hex ids pass through unchanged; UUIDs and slugs
+    are looked up on the list endpoint (same routing as _fetch_item).
+
+    Returns (True, raw_id) or (False, error_message)."""
+    if re.fullmatch(r"[0-9a-f]+", identifier, flags=re.IGNORECASE):
+        return True, identifier
+    ok, data = _fetch_item(ADMIN_BASE, kind, identifier, True)
+    if not ok:
+        return False, data
+    item = _first_item(data, kind)
+    if not item or not item.get("id"):
+        return False, f"'{identifier}' not found."
+    return True, item["id"]
+
+
 @mcp.tool()
 def get_post(identifier: str, chars: int = 1500) -> str:
     """
@@ -860,7 +877,7 @@ def update_post(
     applied.
 
     Args:
-        post_id:       Post id (from get_post).
+        post_id:       Post id - UUID, numeric id, or slug (from get_post / list_posts).
         updated_at:    The Updated timestamp from get_post, verbatim.
         html:          New body as HTML (sent with ?source=html; the
                        HTML→Lexical conversion is lossy — wrap in kg-card
@@ -894,7 +911,10 @@ def update_post(
     if save_revision:
         params["save_revision"] = "true"
 
-    ok, data = _api_post(f"{ADMIN_BASE}/posts/{post_id}/", {"posts": [payload]},
+    ok, raw_id = _resolve_raw_id("posts", post_id)
+    if not ok:
+        return f"Error resolving post id '{post_id}': {raw_id}"
+    ok, data = _api_post(f"{ADMIN_BASE}/posts/{raw_id}/", {"posts": [payload]},
                          params=params or None, method="PUT")
     if not ok:
         return data
@@ -917,7 +937,7 @@ def set_post_status(post_id: str, status: str, updated_at: str, publish_at: str 
     immediately visible on the site.
 
     Args:
-        post_id:    Post id.
+        post_id:    Post id - UUID, numeric id, or slug (from get_post / list_posts).
         status:     'published' or 'draft'.
         updated_at: The Updated timestamp from get_post, verbatim
                     (optimistic lock — fetch the latest first).
@@ -936,7 +956,10 @@ def set_post_status(post_id: str, status: str, updated_at: str, publish_at: str 
     if publish_at.strip():
         payload["publish_at"] = publish_at.strip()
 
-    ok, data = _api_post(f"{ADMIN_BASE}/posts/{post_id}/", {"posts": [payload]}, method="PUT")
+    ok, raw_id = _resolve_raw_id("posts", post_id)
+    if not ok:
+        return f"Error resolving post id '{post_id}': {raw_id}"
+    ok, data = _api_post(f"{ADMIN_BASE}/posts/{raw_id}/", {"posts": [payload]}, method="PUT")
     if not ok:
         return data
     post = _first_item(data, "posts") or {}
@@ -955,11 +978,14 @@ def delete_post(post_id: str) -> str:
     calling.
 
     Args:
-        post_id: Post id (from get_post / list_posts).
+        post_id: Post id - UUID, numeric id, or slug (from get_post / list_posts).
     """
     if not post_id:
         return "post_id is required."
-    ok, data = _api_delete(f"{ADMIN_BASE}/posts/{post_id}/")
+    ok, raw_id = _resolve_raw_id("posts", post_id)
+    if not ok:
+        return f"Error resolving post id '{post_id}': {raw_id}"
+    ok, data = _api_delete(f"{ADMIN_BASE}/posts/{raw_id}/")
     if not ok:
         return data
     return f"Post deleted (id={post_id}). This cannot be undone."
@@ -1040,7 +1066,7 @@ def update_page(
     applied.
 
     Args:
-        page_id:       Page id (from get_page).
+        page_id:       Page id - UUID, numeric id, or slug (from get_page / list_pages).
         updated_at:    The Updated timestamp from get_page, verbatim.
         html:          New body as HTML (sent with ?source=html; the
                        HTML→Lexical conversion is lossy — wrap in kg-card
@@ -1074,7 +1100,10 @@ def update_page(
     if save_revision:
         params["save_revision"] = "true"
 
-    ok, data = _api_post(f"{ADMIN_BASE}/pages/{page_id}/", {"pages": [payload]},
+    ok, raw_id = _resolve_raw_id("pages", page_id)
+    if not ok:
+        return f"Error resolving page id '{page_id}': {raw_id}"
+    ok, data = _api_post(f"{ADMIN_BASE}/pages/{raw_id}/", {"pages": [payload]},
                          params=params or None, method="PUT")
     if not ok:
         return data
@@ -1097,11 +1126,14 @@ def delete_page(page_id: str) -> str:
     calling.
 
     Args:
-        page_id: Page id (from get_page / list_pages).
+        page_id: Page id - UUID, numeric id, or slug (from get_page / list_pages).
     """
     if not page_id:
         return "page_id is required."
-    ok, data = _api_delete(f"{ADMIN_BASE}/pages/{page_id}/")
+    ok, raw_id = _resolve_raw_id("pages", page_id)
+    if not ok:
+        return f"Error resolving page id '{page_id}': {raw_id}"
+    ok, data = _api_delete(f"{ADMIN_BASE}/pages/{raw_id}/")
     if not ok:
         return data
     return f"Page deleted (id={page_id}). This cannot be undone."
