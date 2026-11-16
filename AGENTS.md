@@ -207,6 +207,7 @@ Recommended workflow:
 ## Changelog
 
 ### Unreleased
+- **Fix:** `get_post_content(format="lexical")` — the text extractor only matched `text` inline nodes, but Ghost 6 delivers `extended-text` nodes, so full lexical bodies came back as "(empty)"; code blocks now read the `code` field as well.
 - **Fix:** post/page fetches request `formats=html` in admin mode — the Admin API omits `html` unless asked, so `get_post` previews and `get_post_content(format="html")` came back empty.
 - **Fix:** identifier matching is exactly 24 hex chars now — shorter all-hex slugs (e.g. `decade`) no longer take the raw-id path.
 - **Fix:** scheduling uses Ghost's `published_at` field (there is no `publish_at` field); `set_post_status` accepts `scheduled` and requires `published_at` for it.

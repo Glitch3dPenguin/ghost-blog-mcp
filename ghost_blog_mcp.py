@@ -340,7 +340,7 @@ def _lexical_inline_text(node) -> str:
     def rec(n):
         if not isinstance(n, dict):
             return
-        if n.get("type") == "text":
+        if n.get("type") in ("text", "extended-text"):
             parts.append(n.get("text") or "")
             return
         for c in n.get("children") or []:
@@ -377,8 +377,8 @@ def _lexical_to_text(lexical) -> str:
         if not isinstance(node, dict):
             return
         ntype = node.get("type")
-        if ntype == "code":
-            code = node.get("text")
+        if ntype in ("code", "codeblock"):
+            code = node.get("code") or node.get("text")
             if code:
                 out.append("```\n" + code.strip("\n") + "\n```")
             return
