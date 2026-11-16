@@ -218,6 +218,7 @@ access to a live blog. Treat the endpoint like an admin panel:
   password.
 - **Credentials in `.env`.** The compose example reads `env_file: .env`
   (gitignored). Never commit real keys to the compose file or the repo.
+- **Destructive tools off by default.** `delete_post` / `delete_page` / `delete_tag` refuse to run unless `GHOST_ALLOW_DELETE=1` is set. Every tool also advertises `readOnlyHint` / `destructiveHint` annotations so MCP clients can gate, confirm, or prompt natively.
 - **No key leakage.** Keys are never logged or echoed, and error output
   never includes request URLs with query params (the Content API key
   rides in the query string).
@@ -230,9 +231,11 @@ access to a live blog. Treat the endpoint like an admin panel:
 |---|---|---|
 | `GHOST_URL` | ✅ | Your Ghost site URL, e.g. `https://your-ghost-site.example` (a trailing `/` is fine — it is stripped in code). |
 | `GHOST_ADMIN_KEY` | ✅ for writes | Admin API key, format `<key id>:<64-char-hex-secret>`, from Ghost admin → Integrations → Admin API. Enables full read/write mode. Never logged. |
+| `GHOST_ALLOW_DELETE` | — | Set to `1` to enable the destructive tools (`delete_post`, `delete_page`, `delete_tag`). They are disabled by default and refuse to run until it is set. |
 | `GHOST_CONTENT_KEY` | — | Content API key, from Ghost admin → Integrations → Content API. With no admin key set, the server runs in **read-only mode**. Never logged. |
 | `MCP_TRANSPORT` | — | `streamable-http`, `sse`, or `stdio` (default: `stdio`) |
 | `PORT` | — | Port to bind on for HTTP transports (default: `8000`) |
+| `GHOST_USER_AGENT` | — | Override the User-Agent sent to Ghost (default: a browser-class string that passes Cloudflare). |
 | `HOST` | — | Address to bind for HTTP transports (default: `127.0.0.1`).
   A non-loopback value **requires** `MCP_AUTH_TOKEN`; the server refuses to
   start otherwise. |

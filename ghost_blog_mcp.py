@@ -10,6 +10,7 @@ bodies; full bodies are fetched on demand, one post at a time.
 Deps: mcp[cli], requests. Python 3.10+.
 """
 
+import anyio.to_thread
 import base64
 import hmac
 import json
@@ -20,6 +21,7 @@ import time
 
 import requests
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 # ---------------------------------------------------------------------------
 # Logging setup — suppress noisy streamable-HTTP / Starlette warnings so the
@@ -45,6 +47,13 @@ if not _loopback and not _auth_token:
         "refusing to start: a non-loopback bind (%s) requires MCP_AUTH_TOKEN "
         "(set HOST=127.0.0.1 for local-only use, or set the token to protect "
         "the exposed endpoint)" % _host)
+# Destructive tools (delete_*) are disabled by default; set
+# GHOST_ALLOW_DELETE=1 (or true/yes) to enable them.
+_allow_delete = os.getenv("GHOST_ALLOW_DELETE", "").strip().lower() in (
+    "1", "true", "yes")
+# GHOST_USER_AGENT overrides the Ghost API User-Agent (default is
+# browser-class — see _USER_AGENT below).
+_ghost_user_agent = (os.getenv("GHOST_USER_AGENT") or "").strip()
 
 mcp = FastMCP(
     "GhostBlog",
@@ -70,8 +79,25 @@ _DEFAULT_LIMIT = 15
 # Cloudflare fronts many Ghost sites and 403-blocks (error 1010) the default
 # python urllib/requests signatures. A browser User-Agent gets through —
 # verified against the live instance by the probe.
-_USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-               "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+_USER_AGENT = _ghost_user_agent or (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+
+# ---------------------------------------------------------------------------
+# Tool annotations + destructive-tool gate
+# ---------------------------------------------------------------------------
+_READ_ANN = ToolAnnotations(readOnlyHint=True)
+_WRITE_ANN = ToolAnnotations(readOnlyHint=False)
+_DELETE_ANN = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
+
+
+def _delete_gate():
+    """Return a refusal message when destructive tools are disabled."""
+    if _allow_delete:
+        return None
+    return ("Refusing: destructive operations are disabled by default. "
+            "Set GHOST_ALLOW_DELETE=1 to enable the delete tools.")
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +219,7 @@ def _error(status: int, body: str, admin: bool = True) -> str:
 # hang forever or die on a non-JSON error page.
 # ---------------------------------------------------------------------------
 
-def _api_get(url: str, params: dict = None, admin: bool = True):
+def _api_get_impl(url: str, params: dict = None, admin: bool = True):
     """GET a Ghost endpoint. Returns (True, data) or (False, error_string).
 
     admin=True signs a fresh JWT; admin=False sends the Content API query key.
@@ -220,7 +246,7 @@ def _api_get(url: str, params: dict = None, admin: bool = True):
         return False, f"Error: expected JSON from {url} but got a non-JSON response."
 
 
-def _api_post(url: str, payload: dict, params: dict = None, method: str = "POST"):
+def _api_post_impl(url: str, payload: dict, params: dict = None, method: str = "POST"):
     """POST (default) or PUT a Ghost admin endpoint.
     Returns (True, data) or (False, error_string)."""
     problem = _admin_config_problem()
@@ -236,7 +262,7 @@ def _api_post(url: str, payload: dict, params: dict = None, method: str = "POST"
         return True, None
 
 
-def _api_delete(url: str):
+def _api_delete_impl(url: str):
     """DELETE a Ghost admin endpoint. Returns (True, data) or (False, error_string)."""
     problem = _admin_config_problem()
     if problem:
@@ -253,6 +279,25 @@ def _api_delete(url: str):
 # ---------------------------------------------------------------------------
 # Response-shape + filter + lexical helpers
 # ---------------------------------------------------------------------------
+
+async def _api_get(url: str, params: dict = None, admin: bool = True):
+    """Thread-offloaded _api_get_impl: the MCP SDK runs sync tools on
+    the event loop thread, so the blocking requests core runs in a
+    worker thread (anyio) and the loop never stalls on a Ghost call."""
+    return await anyio.to_thread.run_sync(
+        lambda: _api_get_impl(url, params, admin))
+
+
+async def _api_post(url: str, payload: dict, params: dict = None,
+                    method: str = "POST"):
+    return await anyio.to_thread.run_sync(
+        lambda: _api_post_impl(url, payload, params, method))
+
+
+async def _api_delete(url: str):
+    return await anyio.to_thread.run_sync(
+        lambda: _api_delete_impl(url))
+
 
 def _first_item(data, key: str):
     """Unwrap an Admin-API envelope ({"posts": [...]}) or a bare Content-API
@@ -379,8 +424,8 @@ def _author_names(items) -> str:
 # READ TOOLS
 # ===========================================================================
 
-@mcp.tool()
-def check_connection() -> str:
+@mcp.tool(annotations=_READ_ANN)
+async def check_connection() -> str:
     """
     Verify that credentials and connectivity work, with an auth-mode summary.
     Run this first when debugging a new setup.
@@ -394,7 +439,7 @@ def check_connection() -> str:
     if mode == "unconfigured":
         return "Connection FAILED: " + _content_config_problem()
     if mode == "admin":
-        ok, site = _api_get(f"{ADMIN_BASE}/site/", admin=True)
+        ok, site = await _api_get(f"{ADMIN_BASE}/site/", admin=True)
         if not ok:
             return f"Connection FAILED: {site}"
         s = site.get("site", {}) if isinstance(site, dict) else {}
@@ -403,7 +448,7 @@ def check_connection() -> str:
                 f"Site title: {s.get('title', '?')}\n"
                 f"Ghost version: {s.get('version', '?')}   URL: {s.get('url', '?')}\n"
                 f"Use list_posts() / list_pages() / list_tags() / list_authors() to explore.")
-    ok, settings = _api_get(f"{CONTENT_BASE}/settings/", admin=False)
+    ok, settings = await _api_get(f"{CONTENT_BASE}/settings/", admin=False)
     if not ok:
         return f"Connection FAILED: {settings}"
     s = settings.get("settings", {}) if isinstance(settings, dict) else {}
@@ -413,8 +458,8 @@ def check_connection() -> str:
             f"Use list_posts() / list_pages() / list_tags() / list_authors() to explore.")
 
 
-@mcp.tool()
-def list_posts(
+@mcp.tool(annotations=_READ_ANN)
+async def list_posts(
     status: str = "",
     tag: str = "",
     author: str = "",
@@ -449,7 +494,7 @@ def list_posts(
 
     admin = _mode() == "admin"
     base  = ADMIN_BASE if admin else CONTENT_BASE
-    ok, data = _api_get(f"{base}/posts/", params=params, admin=admin)
+    ok, data = await _api_get(f"{base}/posts/", params=params, admin=admin)
     if not ok:
         return data
 
@@ -492,28 +537,37 @@ _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
                       r"[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
 
-def _fetch_item(base, kind, identifier, admin):
-    """Fetch one post/page by UUID, numeric id, or slug. Ghost 6 path
-    params only accept raw numeric ids (24-hex); UUIDs and slugs are
-    resolved via ?filter= queries on the list endpoint."""
+async def _fetch_item(base, kind, identifier, admin, formats=None):
+    """Fetch one post/page by UUID, raw 24-hex id, or slug. Ghost 6 path
+    params only accept raw 24-hex ids (all-hex slugs exist, e.g.
+    'decade', so the id test is EXACTLY 24 chars); UUIDs and slugs are
+    resolved via ?filter= queries on the list endpoint. formats (e.g.
+    'html') is passed through — the admin API only returns html when
+    asked for it."""
+    extra = {"formats": formats} if formats else None
     if _UUID_RE.match(identifier):
-        return _api_get(f"{base}/{kind}/",
-                        params={"filter": f"uuid:{identifier}"}, admin=admin)
-    if re.fullmatch(r"[0-9a-f]+", identifier, flags=re.IGNORECASE):
-        return _api_get(f"{base}/{kind}/{identifier}/", admin=admin)
-    return _api_get(f"{base}/{kind}/",
-                    params={"filter": f"slug:{identifier}"}, admin=admin)
+        params = {"filter": f"uuid:{identifier}"}
+        if extra:
+            params.update(extra)
+        return await _api_get(f"{base}/{kind}/", params=params, admin=admin)
+    if re.fullmatch(r"[0-9a-f]{24}", identifier, flags=re.IGNORECASE):
+        return await _api_get(f"{base}/{kind}/{identifier}/", params=extra,
+                              admin=admin)
+    params = {"filter": f"slug:{identifier}"}
+    if extra:
+        params.update(extra)
+    return await _api_get(f"{base}/{kind}/", params=params, admin=admin)
 
 
-def _resolve_raw_id(kind: str, identifier: str):
+async def _resolve_raw_id(kind: str, identifier: str):
     """Resolve a post/page identifier to the RAW ObjectID that Ghost 6 path
     params require. Raw 24-hex ids pass through unchanged; UUIDs and slugs
     are looked up on the list endpoint (same routing as _fetch_item).
 
     Returns (True, raw_id) or (False, error_message)."""
-    if re.fullmatch(r"[0-9a-f]+", identifier, flags=re.IGNORECASE):
+    if re.fullmatch(r"[0-9a-f]{24}", identifier, flags=re.IGNORECASE):
         return True, identifier
-    ok, data = _fetch_item(ADMIN_BASE, kind, identifier, True)
+    ok, data = await _fetch_item(ADMIN_BASE, kind, identifier, True)
     if not ok:
         return False, data
     item = _first_item(data, kind)
@@ -522,8 +576,8 @@ def _resolve_raw_id(kind: str, identifier: str):
     return True, item["id"]
 
 
-@mcp.tool()
-def get_post(identifier: str, chars: int = 1500) -> str:
+@mcp.tool(annotations=_READ_ANN)
+async def get_post(identifier: str, chars: int = 1500) -> str:
     """
     Metadata + a truncated body preview for ONE post (by id or slug).
 
@@ -537,7 +591,7 @@ def get_post(identifier: str, chars: int = 1500) -> str:
     chars = max(200, int(chars))
     admin = _mode() == "admin"
     base  = ADMIN_BASE if admin else CONTENT_BASE
-    ok, data = _fetch_item(base, "posts", identifier, admin)
+    ok, data = await _fetch_item(base, "posts", identifier, admin)
     if not ok:
         return f"Error looking up post '{identifier}': {data}"
     post = _first_item(data, "posts")
@@ -567,8 +621,8 @@ def get_post(identifier: str, chars: int = 1500) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
-def get_post_content(identifier: str, format: str = "lexical") -> str:
+@mcp.tool(annotations=_READ_ANN)
+async def get_post_content(identifier: str, format: str = "lexical") -> str:
     """
     The FULL body of one post, on demand. This is the expensive call —
     browse with list_posts()/get_post() first, and only pull full bodies
@@ -584,7 +638,7 @@ def get_post_content(identifier: str, format: str = "lexical") -> str:
         return "Invalid format. Use 'lexical' or 'html'."
     admin = _mode() == "admin"
     base  = ADMIN_BASE if admin else CONTENT_BASE
-    ok, data = _fetch_item(base, "posts", identifier, admin)
+    ok, data = await _fetch_item(base, "posts", identifier, admin)
     if not ok:
         return f"Error looking up post '{identifier}': {data}"
     post = _first_item(data, "posts")
@@ -599,8 +653,8 @@ def get_post_content(identifier: str, format: str = "lexical") -> str:
             "showing text stripped from HTML)\n\n" + _strip_html(post.get("html")))
 
 
-@mcp.tool()
-def list_pages(
+@mcp.tool(annotations=_READ_ANN)
+async def list_pages(
     status: str = "",
     tag: str = "",
     limit: int = _DEFAULT_LIMIT,
@@ -632,7 +686,7 @@ def list_pages(
 
     admin = _mode() == "admin"
     base  = ADMIN_BASE if admin else CONTENT_BASE
-    ok, data = _api_get(f"{base}/pages/", params=params, admin=admin)
+    ok, data = await _api_get(f"{base}/pages/", params=params, admin=admin)
     if not ok:
         return data
 
@@ -670,8 +724,8 @@ def list_pages(
     return "\n".join(lines)
 
 
-@mcp.tool()
-def get_page(identifier: str, chars: int = 1500) -> str:
+@mcp.tool(annotations=_READ_ANN)
+async def get_page(identifier: str, chars: int = 1500) -> str:
     """
     Metadata + a truncated body preview for ONE static page (by id or slug).
 
@@ -682,7 +736,7 @@ def get_page(identifier: str, chars: int = 1500) -> str:
     chars = max(200, int(chars))
     admin = _mode() == "admin"
     base  = ADMIN_BASE if admin else CONTENT_BASE
-    ok, data = _fetch_item(base, "pages", identifier, admin)
+    ok, data = await _fetch_item(base, "pages", identifier, admin)
     if not ok:
         return f"Error looking up page '{identifier}': {data}"
     post = _first_item(data, "pages")
@@ -708,8 +762,8 @@ def get_page(identifier: str, chars: int = 1500) -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
-def list_tags(limit: int = _DEFAULT_LIMIT, page: int = 1, order: str = "name ASC") -> str:
+@mcp.tool(annotations=_READ_ANN)
+async def list_tags(limit: int = _DEFAULT_LIMIT, page: int = 1, order: str = "name ASC") -> str:
     """
     List all tags with post/page counts where the API provides them (counts
     are admin-mode only). Tag names from here filter list_posts(tag=...) and
@@ -720,7 +774,7 @@ def list_tags(limit: int = _DEFAULT_LIMIT, page: int = 1, order: str = "name ASC
 
     admin = _mode() == "admin"
     base  = ADMIN_BASE if admin else CONTENT_BASE
-    ok, data = _api_get(f"{base}/tags/",
+    ok, data = await _api_get(f"{base}/tags/",
                         params={"limit": limit, "page": page, "order": order},
                         admin=admin)
     if not ok:
@@ -739,20 +793,22 @@ def list_tags(limit: int = _DEFAULT_LIMIT, page: int = 1, order: str = "name ASC
              f"total: {pag.get('total', '?')}):", ""]
     for t in tags:
         name, slug = t.get("name", "?"), t.get("slug", "?")
+        tid = t.get("id") or t.get("uuid") or "?"
         count = t.get("count") if isinstance(t.get("count"), dict) else None
         cnt = ""
         if count:
             cnt = f"  posts={count.get('posts', 0)}, pages={count.get('pages', 0)}"
         desc = _truncate(t.get("description") or "", 60)
-        lines.append(f"  {name} ({slug}){cnt}" + (f"  — {desc}" if desc else ""))
-    lines += ["", "Use these names with list_posts(tag=...) or create_post(tags=...)."]
+        lines.append(f"  {name} ({slug})  id={tid}{cnt}" + (f"  — {desc}" if desc else ""))
+    lines += ["", "Use these names with list_posts(tag=...) or create_post(tags=...).",
+              "Tag ids work with update_tag(tag_id=...) / delete_tag(tag_id=...)."]
     if pag.get("page_count", 1) > page:
         lines.append(f"Use list_tags(page={page + 1}) for the next page.")
     return "\n".join(lines)
 
 
-@mcp.tool()
-def list_authors(limit: int = _DEFAULT_LIMIT, page: int = 1) -> str:
+@mcp.tool(annotations=_READ_ANN)
+async def list_authors(limit: int = _DEFAULT_LIMIT, page: int = 1) -> str:
     """
     List the site's authors. Uses the Admin API /users/ in full mode (with
     status and post counts) and the Content API /authors/ in read-only mode.
@@ -763,7 +819,7 @@ def list_authors(limit: int = _DEFAULT_LIMIT, page: int = 1) -> str:
     page  = max(1, int(page))
 
     if _mode() == "admin":
-        ok, data = _api_get(f"{ADMIN_BASE}/users/",
+        ok, data = await _api_get(f"{ADMIN_BASE}/users/",
                             params={"limit": limit, "page": page}, admin=True)
         if not ok:
             return data
@@ -782,7 +838,7 @@ def list_authors(limit: int = _DEFAULT_LIMIT, page: int = 1) -> str:
                     "update_post(authors=...)."]
         return "\n".join(lines)
 
-    ok, data = _api_get(f"{CONTENT_BASE}/authors/",
+    ok, data = await _api_get(f"{CONTENT_BASE}/authors/",
                         params={"limit": limit, "page": page}, admin=False)
     if not ok:
         return data
@@ -803,15 +859,15 @@ def list_authors(limit: int = _DEFAULT_LIMIT, page: int = 1) -> str:
 # WRITE TOOLS (admin-only)
 # ===========================================================================
 
-@mcp.tool()
-def create_post(
+@mcp.tool(annotations=_WRITE_ANN)
+async def create_post(
     title: str,
     html: str = "",
     lexical: str = "",
     status: str = "draft",
     tags: str = "",
     authors: str = "",
-    publish_at: str = "",
+    published_at: str = "",
 ) -> str:
     """
     Create a new post.
@@ -826,12 +882,15 @@ def create_post(
                     lossless HTML embed, wrap the markup in kg-card comments:
                     <!--kg-card-begin: html--> ... <!--kg-card-end: html-->
         lexical:    Body as a Lexical document — a JSON STRING, not an object.
-        status:     'draft' (default) or 'published'.
+        status:     'draft' (default), 'published', or 'scheduled'
+                    (scheduling requires published_at).
         tags:       Comma-separated tag names, e.g. 'news,ai'. Unmatched
                     names are auto-created by Ghost.
         authors:    Comma-separated author emails or ids.
-        publish_at: ISO 8601 datetime for scheduling
-                    (e.g. 2026-09-15T12:00:00.000Z).
+        published_at: ISO 8601 datetime — schedules the post
+                    (e.g. 2026-09-15T12:00:00.000Z); implies status
+                    'scheduled'. Ghost's field is published_at, not
+                    publish_at.
     """
     if not title.strip():
         return "title is required."
@@ -840,35 +899,40 @@ def create_post(
         payload["html"] = html
     if lexical:
         payload["lexical"] = lexical
-    if status:
-        payload["status"] = status
+    if status not in ("draft", "published", "scheduled"):
+        return "Invalid status. Use 'draft', 'published', or 'scheduled'."
+    payload["status"] = status
     if tags.strip():
         payload["tags"] = [{"name": t.strip()} for t in tags.split(",") if t.strip()]
     if authors.strip():
         payload["authors"] = [a.strip() for a in authors.split(",") if a.strip()]
-    if publish_at.strip():
-        payload["publish_at"] = publish_at.strip()
+    if published_at.strip():
+        payload["published_at"] = published_at.strip()
+        payload["status"] = "scheduled"
 
     params = {"source": "html"} if html else None
-    ok, data = _api_post(f"{ADMIN_BASE}/posts/", {"posts": [payload]}, params=params)
+    ok, data = await _api_post(f"{ADMIN_BASE}/posts/", {"posts": [payload]}, params=params)
     if not ok:
         return data
     post = _first_item(data, "posts") or {}
     result = (f"Post created: '{post.get('title', title)}' "
               f"(id={post.get('uuid', '?')}, status={post.get('status', status)}).")
-    if post.get("publish_at"):
-        result += f"  Scheduled to publish at {post['publish_at']}."
+    if post.get("published_at"):
+        result += f"  Scheduled to publish at {post['published_at']}"
     return result
 
 
-@mcp.tool()
-def update_post(
+@mcp.tool(annotations=_WRITE_ANN)
+async def update_post(
     post_id: str,
     updated_at: str,
     html: str = "",
     lexical: str = "",
-    tags: str = "",
-    authors: str = "",
+    title: str = "",
+    slug: str = "",
+    excerpt: str = "",
+    tags: list | None = None,
+    authors: list | None = None,
     save_revision: bool = False,
 ) -> str:
     """
@@ -895,9 +959,16 @@ def update_post(
                        comments for a lossless embed:
                        <!--kg-card-begin: html--> ... <!--kg-card-end: html-->).
         lexical:       New body as a Lexical JSON STRING.
-        tags:          Comma-separated tag names — REPLACES all existing tags.
-        authors:       Comma-separated author emails or ids — REPLACES all
-                       existing authors.
+        title:         New title (omit to leave unchanged).
+        slug:          New slug (omit to leave unchanged).
+        excerpt:       New custom excerpt (omit to leave unchanged).
+        tags:          List of tag names — REPLACES all existing tags.
+                       Omit (default) to leave tags unchanged; pass an
+                       empty list to clear all tags. Unmatched names are
+                       auto-created by Ghost.
+        authors:       List of author emails or ids — REPLACES all
+                       existing authors. Omit to leave unchanged; pass
+                       an empty list to clear all.
         save_revision: Also save the current version as a revision.
     """
     if not post_id:
@@ -911,10 +982,16 @@ def update_post(
         payload["html"] = html
     if lexical:
         payload["lexical"] = lexical
-    if tags.strip():
-        payload["tags"] = [{"name": t.strip()} for t in tags.split(",") if t.strip()]
-    if authors.strip():
-        payload["authors"] = [a.strip() for a in authors.split(",") if a.strip()]
+    if title.strip():
+        payload["title"] = title.strip()
+    if slug.strip():
+        payload["slug"] = slug.strip()
+    if excerpt.strip():
+        payload["custom_excerpt"] = excerpt.strip()
+    if tags is not None:
+        payload["tags"] = [{"name": t.strip()} for t in tags if t and t.strip()]
+    if authors is not None:
+        payload["authors"] = [a.strip() for a in authors if a and a.strip()]
 
     params = {}
     if html:
@@ -922,10 +999,10 @@ def update_post(
     if save_revision:
         params["save_revision"] = "true"
 
-    ok, raw_id = _resolve_raw_id("posts", post_id)
+    ok, raw_id = await _resolve_raw_id("posts", post_id)
     if not ok:
         return f"Error resolving post id '{post_id}': {raw_id}"
-    ok, data = _api_post(f"{ADMIN_BASE}/posts/{raw_id}/", {"posts": [payload]},
+    ok, data = await _api_post(f"{ADMIN_BASE}/posts/{raw_id}/", {"posts": [payload]},
                          params=params or None, method="PUT")
     if not ok:
         return data
@@ -939,8 +1016,8 @@ def update_post(
     return result
 
 
-@mcp.tool()
-def set_post_status(post_id: str, status: str, updated_at: str, publish_at: str = "") -> str:
+@mcp.tool(annotations=_WRITE_ANN)
+async def set_post_status(post_id: str, status: str, updated_at: str, published_at: str = "") -> str:
     """
     Change a post's status (publish, unpublish to draft, or schedule).
 
@@ -949,39 +1026,41 @@ def set_post_status(post_id: str, status: str, updated_at: str, publish_at: str 
 
     Args:
         post_id:    Post id - UUID, numeric id, or slug (from get_post / list_posts).
-        status:     'published' or 'draft'.
+        status:     'published', 'draft', or 'scheduled'.
         updated_at: The Updated timestamp from get_post, verbatim
                     (optimistic lock — fetch the latest first).
-        publish_at: Optional ISO 8601 datetime — a future date schedules the
-                    post (it publishes itself at that time).
+        published_at: ISO 8601 datetime, REQUIRED for status 'scheduled'
+                    — Ghost's field is published_at, not publish_at.
     """
     if not post_id:
         return "post_id is required."
-    if status not in ("published", "draft"):
-        return "Invalid status. Use 'published' or 'draft'."
+    if status not in ("published", "draft", "scheduled"):
+        return "Invalid status. Use 'published', 'draft', or 'scheduled'."
+    if status == "scheduled" and not published_at.strip():
+        return "Scheduling requires published_at (ISO 8601 datetime)."
     if not updated_at:
         return ("updated_at is required (optimistic lock). Fetch the latest post "
                 "first with get_post() and pass its Updated value.")
 
     payload = {"status": status, "updated_at": updated_at}
-    if publish_at.strip():
-        payload["publish_at"] = publish_at.strip()
+    if published_at.strip():
+        payload["published_at"] = published_at.strip()
 
-    ok, raw_id = _resolve_raw_id("posts", post_id)
+    ok, raw_id = await _resolve_raw_id("posts", post_id)
     if not ok:
         return f"Error resolving post id '{post_id}': {raw_id}"
-    ok, data = _api_post(f"{ADMIN_BASE}/posts/{raw_id}/", {"posts": [payload]}, method="PUT")
+    ok, data = await _api_post(f"{ADMIN_BASE}/posts/{raw_id}/", {"posts": [payload]}, method="PUT")
     if not ok:
         return data
     post = _first_item(data, "posts") or {}
     result = f"Post status set to {post.get('status', status)} (id={post.get('uuid', post_id)})."
-    if post.get("publish_at"):
-        result += f"  Publishes at {post['publish_at']}."
+    if post.get("published_at"):
+        result += f"  Publishes at {post['published_at']}."
     return result
 
 
-@mcp.tool()
-def delete_post(post_id: str) -> str:
+@mcp.tool(annotations=_DELETE_ANN)
+async def delete_post(post_id: str) -> str:
     """
     Permanently delete a post. This cannot be undone.
 
@@ -993,17 +1072,20 @@ def delete_post(post_id: str) -> str:
     """
     if not post_id:
         return "post_id is required."
-    ok, raw_id = _resolve_raw_id("posts", post_id)
+    denied = _delete_gate()
+    if denied:
+        return denied
+    ok, raw_id = await _resolve_raw_id("posts", post_id)
     if not ok:
         return f"Error resolving post id '{post_id}': {raw_id}"
-    ok, data = _api_delete(f"{ADMIN_BASE}/posts/{raw_id}/")
+    ok, data = await _api_delete(f"{ADMIN_BASE}/posts/{raw_id}/")
     if not ok:
         return data
     return f"Post deleted (id={post_id}). This cannot be undone."
 
 
-@mcp.tool()
-def create_page(
+@mcp.tool(annotations=_WRITE_ANN)
+async def create_page(
     title: str,
     html: str = "",
     lexical: str = "",
@@ -1035,15 +1117,16 @@ def create_page(
         payload["html"] = html
     if lexical:
         payload["lexical"] = lexical
-    if status:
-        payload["status"] = status
+    if status not in ("draft", "published"):
+        return "Invalid status. Use 'draft' or 'published'."
+    payload["status"] = status
     if tags.strip():
         payload["tags"] = [{"name": t.strip()} for t in tags.split(",") if t.strip()]
     if authors.strip():
         payload["authors"] = [a.strip() for a in authors.split(",") if a.strip()]
 
     params = {"source": "html"} if html else None
-    ok, data = _api_post(f"{ADMIN_BASE}/pages/", {"pages": [payload]}, params=params)
+    ok, data = await _api_post(f"{ADMIN_BASE}/pages/", {"pages": [payload]}, params=params)
     if not ok:
         return data
     post = _first_item(data, "pages") or {}
@@ -1051,14 +1134,17 @@ def create_page(
             f"(id={post.get('uuid', '?')}, status={post.get('status', status)}).")
 
 
-@mcp.tool()
-def update_page(
+@mcp.tool(annotations=_WRITE_ANN)
+async def update_page(
     page_id: str,
     updated_at: str,
     html: str = "",
     lexical: str = "",
-    tags: str = "",
-    authors: str = "",
+    title: str = "",
+    slug: str = "",
+    excerpt: str = "",
+    tags: list | None = None,
+    authors: list | None = None,
     save_revision: bool = False,
 ) -> str:
     """
@@ -1084,9 +1170,16 @@ def update_page(
                        comments for a lossless embed:
                        <!--kg-card-begin: html--> ... <!--kg-card-end: html-->).
         lexical:       New body as a Lexical JSON STRING.
-        tags:          Comma-separated tag names — REPLACES all existing tags.
-        authors:       Comma-separated author emails or ids — REPLACES all
-                       existing authors.
+        title:         New title (omit to leave unchanged).
+        slug:          New slug (omit to leave unchanged).
+        excerpt:       New custom excerpt (omit to leave unchanged).
+        tags:          List of tag names — REPLACES all existing tags.
+                       Omit (default) to leave tags unchanged; pass an
+                       empty list to clear all tags. Unmatched names are
+                       auto-created by Ghost.
+        authors:       List of author emails or ids — REPLACES all
+                       existing authors. Omit to leave unchanged; pass
+                       an empty list to clear all.
         save_revision: Also save the current version as a revision.
     """
     if not page_id:
@@ -1100,10 +1193,16 @@ def update_page(
         payload["html"] = html
     if lexical:
         payload["lexical"] = lexical
-    if tags.strip():
-        payload["tags"] = [{"name": t.strip()} for t in tags.split(",") if t.strip()]
-    if authors.strip():
-        payload["authors"] = [a.strip() for a in authors.split(",") if a.strip()]
+    if title.strip():
+        payload["title"] = title.strip()
+    if slug.strip():
+        payload["slug"] = slug.strip()
+    if excerpt.strip():
+        payload["custom_excerpt"] = excerpt.strip()
+    if tags is not None:
+        payload["tags"] = [{"name": t.strip()} for t in tags if t and t.strip()]
+    if authors is not None:
+        payload["authors"] = [a.strip() for a in authors if a and a.strip()]
 
     params = {}
     if html:
@@ -1111,10 +1210,10 @@ def update_page(
     if save_revision:
         params["save_revision"] = "true"
 
-    ok, raw_id = _resolve_raw_id("pages", page_id)
+    ok, raw_id = await _resolve_raw_id("pages", page_id)
     if not ok:
         return f"Error resolving page id '{page_id}': {raw_id}"
-    ok, data = _api_post(f"{ADMIN_BASE}/pages/{raw_id}/", {"pages": [payload]},
+    ok, data = await _api_post(f"{ADMIN_BASE}/pages/{raw_id}/", {"pages": [payload]},
                          params=params or None, method="PUT")
     if not ok:
         return data
@@ -1128,8 +1227,8 @@ def update_page(
     return result
 
 
-@mcp.tool()
-def delete_page(page_id: str) -> str:
+@mcp.tool(annotations=_DELETE_ANN)
+async def delete_page(page_id: str) -> str:
     """
     Permanently delete a static page. This cannot be undone.
 
@@ -1141,17 +1240,20 @@ def delete_page(page_id: str) -> str:
     """
     if not page_id:
         return "page_id is required."
-    ok, raw_id = _resolve_raw_id("pages", page_id)
+    denied = _delete_gate()
+    if denied:
+        return denied
+    ok, raw_id = await _resolve_raw_id("pages", page_id)
     if not ok:
         return f"Error resolving page id '{page_id}': {raw_id}"
-    ok, data = _api_delete(f"{ADMIN_BASE}/pages/{raw_id}/")
+    ok, data = await _api_delete(f"{ADMIN_BASE}/pages/{raw_id}/")
     if not ok:
         return data
     return f"Page deleted (id={page_id}). This cannot be undone."
 
 
-@mcp.tool()
-def create_tag(name: str, slug: str = "", description: str = "") -> str:
+@mcp.tool(annotations=_WRITE_ANN)
+async def create_tag(name: str, slug: str = "", description: str = "") -> str:
     """
     Create a new tag.
 
@@ -1170,7 +1272,7 @@ def create_tag(name: str, slug: str = "", description: str = "") -> str:
     if description.strip():
         tag["description"] = description.strip()
 
-    ok, data = _api_post(f"{ADMIN_BASE}/tags/", {"tags": [tag]})
+    ok, data = await _api_post(f"{ADMIN_BASE}/tags/", {"tags": [tag]})
     if not ok:
         return data
     created = _first_item(data, "tags") or {}
@@ -1178,8 +1280,8 @@ def create_tag(name: str, slug: str = "", description: str = "") -> str:
             f"(id={created.get('id', '?')}, slug={created.get('slug', '?')}).")
 
 
-@mcp.tool()
-def update_tag(tag_id: str, name: str = "", slug: str = "", description: str = "") -> str:
+@mcp.tool(annotations=_WRITE_ANN)
+async def update_tag(tag_id: str, name: str = "", slug: str = "", description: str = "") -> str:
     """
     Update an existing tag (name, slug, and/or description).
 
@@ -1203,15 +1305,15 @@ def update_tag(tag_id: str, name: str = "", slug: str = "", description: str = "
     if not tag:
         return "Nothing to update — provide name, slug, and/or description."
 
-    ok, data = _api_post(f"{ADMIN_BASE}/tags/{tag_id}/", {"tags": [tag]}, method="PUT")
+    ok, data = await _api_post(f"{ADMIN_BASE}/tags/{tag_id}/", {"tags": [tag]}, method="PUT")
     if not ok:
         return data
     updated = _first_item(data, "tags") or {}
     return f"Tag updated: '{updated.get('name', '?')}' (id={updated.get('id', tag_id)})."
 
 
-@mcp.tool()
-def delete_tag(tag_id: str) -> str:
+@mcp.tool(annotations=_DELETE_ANN)
+async def delete_tag(tag_id: str) -> str:
     """
     Permanently delete a tag (the tag is removed from posts/pages that use
     it). This cannot be undone.
@@ -1224,7 +1326,10 @@ def delete_tag(tag_id: str) -> str:
     """
     if not tag_id:
         return "tag_id is required."
-    ok, data = _api_delete(f"{ADMIN_BASE}/tags/{tag_id}/")
+    denied = _delete_gate()
+    if denied:
+        return denied
+    ok, data = await _api_delete(f"{ADMIN_BASE}/tags/{tag_id}/")
     if not ok:
         return data
     return f"Tag deleted (id={tag_id}). This cannot be undone."

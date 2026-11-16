@@ -145,6 +145,11 @@ caught by the build step. Be strict about local verification.
 - **The Ghost 6 admin API does NOT accept v3-style `?key=` queries — it 403s by
   design even with a perfectly valid key.** The Admin API is JWT-only
   (`Authorization: Ghost <token>`).
+- **The Admin API omits `html` unless you ask** — GET it with
+  `formats=html`; `_fetch_item(..., formats="html")` does this for
+  post/page bodies, so previews and `format="html"` work in admin mode.
+- **Scheduling = `status: "scheduled"` + `published_at`** — there is no
+  `publish_at` field on posts; sending one is a silent no-op.
 - **PUT posts requires `updated_at`** (optimistic locking) — GET the latest version
   first and send its `updated_at` back verbatim.
 - **A PUT with `{"html": ...}` and no `?source=html` returns 200 but is a SILENT
@@ -202,6 +207,15 @@ Recommended workflow:
 ## Changelog
 
 ### Unreleased
+- **Fix:** post/page fetches request `formats=html` in admin mode — the Admin API omits `html` unless asked, so `get_post` previews and `get_post_content(format="html")` came back empty.
+- **Fix:** identifier matching is exactly 24 hex chars now — shorter all-hex slugs (e.g. `decade`) no longer take the raw-id path.
+- **Fix:** scheduling uses Ghost's `published_at` field (there is no `publish_at` field); `set_post_status` accepts `scheduled` and requires `published_at` for it.
+- **New:** `update_post` / `update_page` can change `title`, `slug`, and `custom_excerpt`; `tags` / `authors` are lists — omit to keep, empty list to clear.
+- **New:** `create_post` / `create_page` validate `status` (draft / published / scheduled for posts).
+- **Security:** destructive tools (`delete_*`) refuse to run unless `GHOST_ALLOW_DELETE=1`; all tools carry `readOnlyHint` / `destructiveHint` annotations.
+- **New:** `GHOST_USER_AGENT` overrides the Ghost API User-Agent (default: the browser-class string that passes Cloudflare).
+- **Fix:** all tools are async and the blocking requests calls run in worker threads — a slow Ghost call no longer stalls the event loop under HTTP transport.
+- **Docs:** `list_tags` prints tag ids (needed by `update_tag` / `delete_tag`).
 - **New:** Initial release — 18 tools (8 read, 10 write) for the Ghost Admin + Content APIs.
 - **New:** Hand-rolled HS256 admin JWT (stdlib only, no `jwt` dependency).
 - **New:** Read-only mode with `GHOST_CONTENT_KEY` alone; write tools require `GHOST_ADMIN_KEY`.
@@ -232,6 +246,9 @@ Recommended workflow:
   must not echo request URLs with params.
 - Write tools have real side effects on a live blog — treat them as
   production-affecting and keep the confirm-before-write contract in docstrings.
+- Destructive tools are off by default: `delete_*` refuse without
+  `GHOST_ALLOW_DELETE=1`, and they carry `destructiveHint` so MCP
+  clients can confirm natively.
 - The MCP HTTP surface is loopback-only by default; exposing it
   requires `HOST` + `MCP_AUTH_TOKEN` (fail-closed at start) and a
   reverse proxy with its own auth when it leaves the network.
