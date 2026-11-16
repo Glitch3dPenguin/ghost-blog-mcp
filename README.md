@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/ghost-blog-mcp.png" width="280" alt="Ghost Blog MCP logo" />
+</p>
+
 <h1 align="center">Ghost Blog MCP Server</h1>
 
 <p align="center">
