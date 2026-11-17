@@ -56,9 +56,9 @@
 
 | Tool | Description |
 |---|---|
-| `create_post` | Create a post: title + body as HTML (sent with `?source=html`) or a Lexical JSON string, status (default draft), auto-creating tag names, authors by email/id, optional `publish_at` for scheduling. |
-| `update_post` | Update a post. `updated_at` is required (fetch latest first); tags/authors are REPLACED, not merged; `save_revision` supported. |
-| `set_post_status` | Publish, unpublish, or schedule a post (`draft` / `published`, optional `publish_at`). |
+| `create_post` | Create a post: title + body as HTML (sent with `?source=html`) or a Lexical JSON string, status (default draft), tag/author name lists, optional `published_at` for scheduling. |
+| `update_post` | Update a post — title, slug, excerpt, or body. `updated_at` is required (fetch latest first); tags/authors are REPLACED, not merged; `save_revision` supported. |
+| `set_post_status` | Publish, unpublish, or schedule a post (`draft` / `published` / `scheduled`, optional `published_at`). |
 | `delete_post` | Permanently delete a post. |
 | `create_page` | Create a static page (same shape as `create_post`, no scheduling). |
 | `update_page` | Update a static page (same shape as `update_post`). |
@@ -101,10 +101,15 @@ services:
       # Options: streamable-http | sse | stdio
       MCP_TRANSPORT: "streamable-http"
       PORT: "8000"
+      # The container listens on all interfaces (docker forwards the
+      # published port to the container's eth0); the non-loopback bind
+      # requires MCP_AUTH_TOKEN, set in .env
+      HOST: "0.0.0.0"
+      MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:?set MCP_AUTH_TOKEN in .env}"
 ```
 
 ```sh
-cp .env.example .env   # then fill in GHOST_URL / GHOST_ADMIN_KEY
+cp .env.example .env   # then fill in GHOST_URL / GHOST_ADMIN_KEY / MCP_AUTH_TOKEN
 docker compose up -d
 ```
 
@@ -119,7 +124,7 @@ With `MCP_TRANSPORT=sse` the endpoint is `http://<host>:8000/sse`.
 
 1. In Portainer, go to **Stacks → Add stack**
 2. Paste the `docker-compose.yml` contents above
-3. Fill in your Ghost credentials in the environment section
+3. Create the `.env` file on the host (from `.env.example`) and fill in `GHOST_URL`, `GHOST_ADMIN_KEY`, and `MCP_AUTH_TOKEN`
 4. Deploy
 
 #### Connecting your AI client to the container
@@ -239,7 +244,7 @@ access to a live blog. Treat the endpoint like an admin panel:
 | `HOST` | — | Address to bind for HTTP transports (default: `127.0.0.1`).
   A non-loopback value **requires** `MCP_AUTH_TOKEN`; the server refuses to
   start otherwise. |
-| `MCP_AUTH_TOKEN` | required with non-loopback `HOST` | Bearer token
+| `MCP_AUTH_TOKEN` | required for the compose deployment (and any non-loopback `HOST`) | Bearer token
   enforced on the MCP HTTP surface (`Authorization: Bearer ...`). A
   loopback bind works without one, but then the endpoint is
   unauthenticated — keep it loopback-only. Never logged. |

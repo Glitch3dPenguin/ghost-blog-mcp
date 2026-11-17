@@ -207,6 +207,16 @@ Recommended workflow:
 ## Changelog
 
 ### Unreleased
+- **Fix:** `docker-compose.yml` sets `HOST: "0.0.0.0"` and requires `MCP_AUTH_TOKEN` — docker's published port forwards to the container's eth0, so the module's loopback default was unreachable from the host.
+- **Fix:** scheduling success lines ("Scheduled to publish at" / "Publishes at") key on `status == "scheduled"` — every published post carries `published_at`, so the presence check fired for plain publishes.
+- **Fix:** `create_post` only forces `status: scheduled` when `published_at` is set with the default `draft` status; an explicit status wins (backdating works).
+- **Fix:** `tags` / `authors` are lists on all create/update tools (create_* took comma-strings while update_* took lists — now one shape).
+- **Fix:** `update_tag` / `delete_tag` accept raw ids, UUIDs, and slugs like the post/page write tools (Ghost 6 path params are raw-id-only).
+- **Fix:** `list_posts` author filter docstring corrected to author slug (live-verified: `author:<slug>` matches, `author:<email>` matches nothing).
+- **Security:** bearer-token compare is constant-time (`hmac.compare_digest`).
+- **New:** test suite (mocked HTTP: auth middleware, id resolution, delete gate, scheduling/backdating, tags shape) + `Tests` CI workflow on push/PR.
+- **New:** Dockerfile runs as a non-root user + HEALTHCHECK; requirements declare `uvicorn` / `anyio` directly (the unused `[cli]` extra is dropped).
+- **Release:** `v0.1.0` — first semver tag; the publish workflow now tags `:v0.1.0` / `:v0.1` / `:0` alongside `:latest`.
 - **Fix:** `get_post_content(format="lexical")` — the text extractor only matched `text` inline nodes, but Ghost 6 delivers `extended-text` nodes, so full lexical bodies came back as "(empty)"; code blocks now read the `code` field as well.
 - **Fix:** post/page fetches request `formats=html` in admin mode — the Admin API omits `html` unless asked, so `get_post` previews and `get_post_content(format="html")` came back empty.
 - **Fix:** identifier matching is exactly 24 hex chars now — shorter all-hex slugs (e.g. `decade`) no longer take the raw-id path.
