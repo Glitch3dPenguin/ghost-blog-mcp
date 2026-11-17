@@ -16,3 +16,10 @@ services:
       # Options: streamable-http | sse | stdio
       MCP_TRANSPORT: "streamable-http"
       PORT: "8000"
+      # The container must listen on all interfaces: docker's published
+      # port forwards to the container's eth0, not its loopback. The
+      # non-loopback bind REQUIRES MCP_AUTH_TOKEN (the server refuses to
+      # start without it); clients must send:
+      #   Authorization: Bearer <MCP_AUTH_TOKEN>
+      HOST: "0.0.0.0"
+      MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:?set MCP_AUTH_TOKEN in .env}"

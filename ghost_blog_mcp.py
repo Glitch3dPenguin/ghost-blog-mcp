@@ -7,7 +7,7 @@ API (query-key auth, read-only fallback) as MCP tools.
 Context-window safe by design: list tools return compact tables without
 bodies; full bodies are fetched on demand, one post at a time.
 
-Deps: mcp[cli], requests. Python 3.10+.
+Deps: mcp, requests, uvicorn (HTTP transports), anyio. Python 3.10+.
 """
 
 import anyio.to_thread
@@ -479,7 +479,8 @@ async def list_posts(
     Args:
         status: 'draft', 'published', 'scheduled', or 'all' (admin mode).
         tag:    Filter by tag name or slug.
-        author: Filter by author email (or author id, admin mode).
+        author: Filter by author slug (from list_authors — the user's
+                 slug, e.g. 'max'), or author id (admin mode).
         limit:  Posts per page (default 15, max 100).
         page:   Page number (1-based).
         order:  e.g. 'published_at DESC' (default), 'created_at ASC'.
@@ -868,8 +869,8 @@ async def create_post(
     html: str = "",
     lexical: str = "",
     status: str = "draft",
-    tags: str = "",
-    authors: str = "",
+    tags: list | None = None,
+    authors: list | None = None,
     published_at: str = "",
 ) -> str:
     """
@@ -887,12 +888,14 @@ async def create_post(
         lexical:    Body as a Lexical document — a JSON STRING, not an object.
         status:     'draft' (default), 'published', or 'scheduled'
                     (scheduling requires published_at).
-        tags:       Comma-separated tag names, e.g. 'news,ai'. Unmatched
-                    names are auto-created by Ghost.
-        authors:    Comma-separated author emails or ids.
-        published_at: ISO 8601 datetime — schedules the post
-                    (e.g. 2026-09-15T12:00:00.000Z); implies status
-                    'scheduled'. Ghost's field is published_at, not
+        tags:       List of tag names, e.g. ['news', 'ai'] (unmatched
+                    names are auto-created by Ghost).
+        authors:    List of author emails or ids.
+        published_at: ISO 8601 datetime (e.g. 2026-09-15T12:00:00.000Z).
+                    With the default status 'draft' it schedules the post
+                    (status becomes 'scheduled'); with an explicit status it
+                    is used as-is — a past date with status 'published'
+                    backdates the post. Ghost's field is published_at, not
                     publish_at.
     """
     if not title.strip():
@@ -905,13 +908,14 @@ async def create_post(
     if status not in ("draft", "published", "scheduled"):
         return "Invalid status. Use 'draft', 'published', or 'scheduled'."
     payload["status"] = status
-    if tags.strip():
-        payload["tags"] = [{"name": t.strip()} for t in tags.split(",") if t.strip()]
-    if authors.strip():
-        payload["authors"] = [a.strip() for a in authors.split(",") if a.strip()]
+    if tags:
+        payload["tags"] = [{"name": t.strip()} for t in tags if t and t.strip()]
+    if authors:
+        payload["authors"] = [a.strip() for a in authors if a and a.strip()]
     if published_at.strip():
         payload["published_at"] = published_at.strip()
-        payload["status"] = "scheduled"
+        if status == "draft":
+            payload["status"] = "scheduled"
 
     params = {"source": "html"} if html else None
     ok, data = await _api_post(f"{ADMIN_BASE}/posts/", {"posts": [payload]}, params=params)
@@ -920,7 +924,7 @@ async def create_post(
     post = _first_item(data, "posts") or {}
     result = (f"Post created: '{post.get('title', title)}' "
               f"(id={post.get('uuid', '?')}, status={post.get('status', status)}).")
-    if post.get("published_at"):
+    if post.get("status") == "scheduled" and post.get("published_at"):
         result += f"  Scheduled to publish at {post['published_at']}"
     return result
 
@@ -1057,7 +1061,7 @@ async def set_post_status(post_id: str, status: str, updated_at: str, published_
         return data
     post = _first_item(data, "posts") or {}
     result = f"Post status set to {post.get('status', status)} (id={post.get('uuid', post_id)})."
-    if post.get("published_at"):
+    if post.get("status") == "scheduled" and post.get("published_at"):
         result += f"  Publishes at {post['published_at']}."
     return result
 
@@ -1093,11 +1097,11 @@ async def create_page(
     html: str = "",
     lexical: str = "",
     status: str = "draft",
-    tags: str = "",
-    authors: str = "",
+    tags: list | None = None,
+    authors: list | None = None,
 ) -> str:
     """
-    Create a new static page. (Pages cannot be scheduled — no publish_at.)
+    Create a new static page. (Pages cannot be scheduled — no published_at.)
 
     IMPORTANT: Confirm the title/body with the user before calling — a
     published page is immediately live on the site.
@@ -1110,8 +1114,8 @@ async def create_page(
                  <!--kg-card-begin: html--> ... <!--kg-card-end: html-->
         lexical: Body as a Lexical document — a JSON STRING, not an object.
         status:  'draft' (default) or 'published'.
-        tags:    Comma-separated tag names (unmatched names are auto-created).
-        authors: Comma-separated author emails or ids.
+        tags:    List of tag names (unmatched names are auto-created).
+        authors: List of author emails or ids.
     """
     if not title.strip():
         return "title is required."
@@ -1123,10 +1127,10 @@ async def create_page(
     if status not in ("draft", "published"):
         return "Invalid status. Use 'draft' or 'published'."
     payload["status"] = status
-    if tags.strip():
-        payload["tags"] = [{"name": t.strip()} for t in tags.split(",") if t.strip()]
-    if authors.strip():
-        payload["authors"] = [a.strip() for a in authors.split(",") if a.strip()]
+    if tags:
+        payload["tags"] = [{"name": t.strip()} for t in tags if t and t.strip()]
+    if authors:
+        payload["authors"] = [a.strip() for a in authors if a and a.strip()]
 
     params = {"source": "html"} if html else None
     ok, data = await _api_post(f"{ADMIN_BASE}/pages/", {"pages": [payload]}, params=params)
@@ -1291,7 +1295,7 @@ async def update_tag(tag_id: str, name: str = "", slug: str = "", description: s
     IMPORTANT: Confirm with the user before calling.
 
     Args:
-        tag_id:      Tag id (from list_tags).
+        tag_id:      Tag id - raw id, UUID, or slug (from list_tags).
         name:        New name (omit to keep).
         slug:        New slug (omit to keep).
         description: New description (omit to keep).
@@ -1308,7 +1312,10 @@ async def update_tag(tag_id: str, name: str = "", slug: str = "", description: s
     if not tag:
         return "Nothing to update — provide name, slug, and/or description."
 
-    ok, data = await _api_post(f"{ADMIN_BASE}/tags/{tag_id}/", {"tags": [tag]}, method="PUT")
+    ok, raw_id = await _resolve_raw_id("tags", tag_id)
+    if not ok:
+        return f"Error resolving tag id '{tag_id}': {raw_id}"
+    ok, data = await _api_post(f"{ADMIN_BASE}/tags/{raw_id}/", {"tags": [tag]}, method="PUT")
     if not ok:
         return data
     updated = _first_item(data, "tags") or {}
@@ -1325,14 +1332,17 @@ async def delete_tag(tag_id: str) -> str:
     calling.
 
     Args:
-        tag_id: Tag id (from list_tags).
+        tag_id: Tag id - raw id, UUID, or slug (from list_tags).
     """
     if not tag_id:
         return "tag_id is required."
     denied = _delete_gate()
     if denied:
         return denied
-    ok, data = await _api_delete(f"{ADMIN_BASE}/tags/{tag_id}/")
+    ok, raw_id = await _resolve_raw_id("tags", tag_id)
+    if not ok:
+        return f"Error resolving tag id '{tag_id}': {raw_id}"
+    ok, data = await _api_delete(f"{ADMIN_BASE}/tags/{raw_id}/")
     if not ok:
         return data
     return f"Tag deleted (id={tag_id}). This cannot be undone."
@@ -1358,7 +1368,7 @@ def _token_auth(app):
         if scope["type"] == "http":
             supplied = next((v for k, v in scope.get("headers", [])
                              if k == b"authorization"), b"")
-            if supplied != expected:
+            if not hmac.compare_digest(supplied, expected):
                 await _reject(send)
                 return
         await app(scope, receive, send)
