@@ -43,7 +43,7 @@
 
 | Tool | Description |
 |---|---|
-| `check_connection` | Verify credentials and connectivity, with the current auth mode (admin / content-only / unconfigured). In admin mode the key is proven against an auth-required endpoint (`GET /users/me/` — a broken key fails loudly) and the authenticated admin user is reported. Run first when debugging a new setup. |
+| `check_connection` | Verify credentials and connectivity, with the current auth mode (admin / content-only / unconfigured). In admin mode the key is proven against an auth-required endpoint (`GET /users/` — a broken key fails loudly with 401; `GET /site/` would answer 200 either way). Run first when debugging a new setup. |
 | `list_posts` | Compact one-line-per-post table: title, status, tags, author, date. Filters: status, tag, author; plus paging and ordering. Drafts are visible in admin mode only. |
 | `get_post` | Metadata + a truncated body preview (default 1500 chars, adjustable) for one post by id or slug. |
 | `get_post_content` | The FULL body of one post, on demand — `lexical` (the Lexical document parsed to readable plain text, default) or `html` (raw). |

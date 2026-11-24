@@ -450,18 +450,18 @@ async def check_connection() -> str:
             return ("Connection FAILED: GHOST_ADMIN_KEY secret is not valid hex \u2014 "
                     "re-copy the full key from Ghost admin > Integrations > "
                     "Admin API.")
-        # GET /users/me/ requires a valid key — the real auth probe. (The
-        # public /site/ endpoint answers 200 even with a broken key on
-        # Ghost 6, so it proves connectivity only, not credentials.)
-        ok, me = await _api_get(f"{ADMIN_BASE}/users/me/", admin=True)
+        # GET /users/ requires a valid key — the lightest auth-required
+        # read, so the real auth probe. (The public /site/ endpoint
+        # answers 200 even with a broken key on Ghost 6, so it proves
+        # connectivity only, not credentials. Ghost 6 has no /users/me/ —
+        # that path 404s through the users/:id route, live-verified.)
+        ok, users = await _api_get(f"{ADMIN_BASE}/users/", admin=True)
         if not ok:
-            return f"Connection FAILED: {me}"
-        user = _first_item(me, "users") or {}
+            return f"Connection FAILED: {users}"
         ok, site = await _api_get(f"{ADMIN_BASE}/site/", admin=True)
         s = site.get("site", {}) if ok and isinstance(site, dict) else {}
         return (f"Connected to {GHOST_URL} — OK.\n"
-                f"Auth mode: admin (full read/write)\n"
-                f"Admin user: {user.get('name', '?')}\n"
+                f"Auth mode: admin (full read/write) — key verified against the Admin API\n"
                 f"Site title: {s.get('title', '?')}\n"
                 f"Ghost version: {s.get('version', '?')}   URL: {s.get('url', '?')}\n"
                 f"Use list_posts() / list_pages() / list_tags() / list_authors() to explore.")

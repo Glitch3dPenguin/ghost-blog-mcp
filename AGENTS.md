@@ -175,8 +175,9 @@ about local verification — the image build is not a behavior check.
   sweep `list_posts` / `list_pages` for the stray row by title and delete it.
 - `GET /ghost/api/admin/site/` is PUBLIC on Ghost 6 (200 without auth, and even
   with a broken admin key) — it proves connectivity only, never credentials.
-  `GET /ghost/api/admin/users/me/` is the auth-required probe (401
-  `UNKNOWN_ADMIN_API_KEY` on a bad key).
+  `GET /ghost/api/admin/users/` is the lightest auth-required probe (401
+  `UNKNOWN_ADMIN_API_KEY` on a bad key). Ghost 6 has no `/users/me/` — that
+  path 404s through the `users/:id` route (live-verified 11-24).
 - `/images/` is deliberately not exposed (YAGNI for a blog MCP).
 
 ## Tool guidance (for agents consuming this server)
@@ -217,7 +218,7 @@ Recommended workflow:
 
 ### Unreleased
 - **New:** `get_page_content` — the full body of one page on demand (the Lexical document parsed to readable text, or raw HTML), mirroring `get_post_content`. Pages now have the same see-half as posts, custom HTML blocks included (19 tools: 9 read, 10 write).
-- **Fix:** `check_connection` in admin mode proves the key against an auth-required endpoint (`GET /users/me/`) — `GET /site/` is public on Ghost 6, so a broken admin key reported green before. Malformed keys (missing parts, non-hex secret) fail cleanly with no network round trip, and the authenticated admin user is reported.
+- **Fix:** `check_connection` in admin mode proves the key against an auth-required endpoint (`GET /users/` — Ghost 6 has no `/users/me/`; that path 404s through the `users/:id` route) — `GET /site/` is public on Ghost 6, so a broken admin key reported green before. Malformed keys (missing parts, non-hex secret) fail cleanly with no network round trip.
 - **Fix:** `get_post_content` requests `formats=html` in admin mode even for the `lexical` format — the no-lexical fallback (legacy HTML-only content) returned empty text before because the Admin API omits `html` unless asked.
 - **Fix:** `docker-compose.yml` sets `HOST: "0.0.0.0"` and requires `MCP_AUTH_TOKEN` — docker's published port forwards to the container's eth0, so the module's loopback default was unreachable from the host.
 - **Fix:** scheduling success lines ("Scheduled to publish at" / "Publishes at") key on `status == "scheduled"` — every published post carries `published_at`, so the presence check fired for plain publishes.

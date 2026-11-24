@@ -320,13 +320,13 @@ def test_list_posts_author_docstring_says_slug():
 
 # --- check_connection (the auth probe) -------------------------------------
 
-def test_check_connection_admin_proves_key_via_users_me(monkeypatch):
+def test_check_connection_admin_proves_key_via_users_list(monkeypatch):
     monkeypatch.setattr(g, "ADMIN_KEY", "f" * 24 + ":" + "a" * 64)
     calls = []
 
     async def fake(url, *args, **kwargs):
         calls.append(url)
-        if url.endswith("/users/me/"):
+        if url.endswith("/users/"):
             return True, {"users": [{"name": "Max"}]}
         return True, {"site": {"title": "T", "version": "6.77",
                                "url": "https://t.example"}}
@@ -334,9 +334,9 @@ def test_check_connection_admin_proves_key_via_users_me(monkeypatch):
     monkeypatch.setattr(g, "_api_get", fake)
     out = run(g.check_connection())
     assert "OK" in out
-    assert "Max" in out
+    assert "verified" in out
     assert "6.77" in out
-    assert calls[0].endswith("/users/me/")
+    assert calls[0].endswith("/users/")
 
 
 def test_check_connection_admin_bad_key_fails(monkeypatch):
