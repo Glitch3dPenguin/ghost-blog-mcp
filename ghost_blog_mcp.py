@@ -439,12 +439,29 @@ async def check_connection() -> str:
     if mode == "unconfigured":
         return "Connection FAILED: " + _content_config_problem()
     if mode == "admin":
-        ok, site = await _api_get(f"{ADMIN_BASE}/site/", admin=True)
+        key_id, secret = _parse_admin_key()
+        if not key_id or not secret:
+            return ("Connection FAILED: GHOST_ADMIN_KEY has an invalid format \u2014 "
+                    "expect <key id>:<hex secret> with both parts set. Copy the "
+                    "full key from Ghost admin > Integrations > Admin API.")
+        try:
+            bytes.fromhex(secret)
+        except ValueError:
+            return ("Connection FAILED: GHOST_ADMIN_KEY secret is not valid hex \u2014 "
+                    "re-copy the full key from Ghost admin > Integrations > "
+                    "Admin API.")
+        # GET /users/me/ requires a valid key — the real auth probe. (The
+        # public /site/ endpoint answers 200 even with a broken key on
+        # Ghost 6, so it proves connectivity only, not credentials.)
+        ok, me = await _api_get(f"{ADMIN_BASE}/users/me/", admin=True)
         if not ok:
-            return f"Connection FAILED: {site}"
-        s = site.get("site", {}) if isinstance(site, dict) else {}
+            return f"Connection FAILED: {me}"
+        user = _first_item(me, "users") or {}
+        ok, site = await _api_get(f"{ADMIN_BASE}/site/", admin=True)
+        s = site.get("site", {}) if ok and isinstance(site, dict) else {}
         return (f"Connected to {GHOST_URL} — OK.\n"
                 f"Auth mode: admin (full read/write)\n"
+                f"Admin user: {user.get('name', '?')}\n"
                 f"Site title: {s.get('title', '?')}\n"
                 f"Ghost version: {s.get('version', '?')}   URL: {s.get('url', '?')}\n"
                 f"Use list_posts() / list_pages() / list_tags() / list_authors() to explore.")
@@ -640,8 +657,10 @@ async def get_post_content(identifier: str, format: str = "lexical") -> str:
         return "Invalid format. Use 'lexical' or 'html'."
     admin = _mode() == "admin"
     base  = ADMIN_BASE if admin else CONTENT_BASE
+    # Request html even in lexical mode: the Admin API omits it unless asked,
+    # and the no-lexical fallback below needs it (legacy html-only content).
     ok, data = await _fetch_item(base, "posts", identifier, admin,
-                                  formats="html" if format == "html" else None)
+                                  formats="html" if admin else None)
     if not ok:
         return f"Error looking up post '{identifier}': {data}"
     post = _first_item(data, "posts")
@@ -721,7 +740,8 @@ async def list_pages(
         slug = (p.get("slug") or "")[:38]
         lines.append(f"{date:<11}  {str(p.get('status', '?')):<10}  {title:<52}  "
                      f"{slug:<40}  {tags:<22}  {authors}")
-    lines += ["", "Use get_page(<slug>) for metadata + a truncated body preview."]
+    lines += ["", "Use get_page(<slug>) for metadata + a truncated body preview, "
+              "get_page_content(<slug>) for the full body."]
     if pag.get("page_count", 1) > page:
         lines.append(f"Use list_pages(page={page + 1}) for the next page.")
     return "\n".join(lines)
@@ -762,8 +782,48 @@ async def get_page(identifier: str, chars: int = 1500) -> str:
         "",
         f"--- Body (first {chars} chars) ---",
         _truncate(_strip_html(post.get("html")), chars),
+        "",
+        "Use get_page_content() for the full body; "
+        "get_page_content(format='html') for raw HTML.",
     ]
     return "\n".join(lines)
+
+
+@mcp.tool(annotations=_READ_ANN)
+async def get_page_content(identifier: str, format: str = "lexical") -> str:
+    """
+    The FULL body of one static page, on demand. This is the expensive call —
+    browse with list_pages()/get_page() first, and only pull full bodies for
+    the pages you actually need.
+
+    This is where a page's custom HTML blocks live: they are html nodes in the
+    Lexical document, which the flattened get_page() preview cannot show as
+    stored.
+
+    Args:
+        identifier: Page id or slug.
+        format:     'lexical' (default) — the Lexical document (a JSON string
+                    from the API) parsed into readable plain text; or
+                    'html' — the raw HTML as stored.
+    """
+    if format not in ("lexical", "html"):
+        return "Invalid format. Use 'lexical' or 'html'."
+    admin = _mode() == "admin"
+    base  = ADMIN_BASE if admin else CONTENT_BASE
+    ok, data = await _fetch_item(base, "pages", identifier, admin,
+                                  formats="html" if admin else None)
+    if not ok:
+        return f"Error looking up page '{identifier}': {data}"
+    page = _first_item(data, "pages")
+    if not page:
+        return f"Page '{identifier}' returned an unexpected response."
+    if format == "html":
+        return page.get("html") or "(no HTML content)"
+    lexical = page.get("lexical")
+    if lexical:
+        return _lexical_to_text(lexical)
+    return ("(no lexical document available for this page — "
+            "showing text stripped from HTML)\n\n" + _strip_html(page.get("html")))
 
 
 @mcp.tool(annotations=_READ_ANN)

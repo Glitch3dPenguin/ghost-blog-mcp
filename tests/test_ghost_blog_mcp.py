@@ -6,6 +6,7 @@ with fakes. The auth middleware is exercised through its ASGI protocol,
 and the fail-closed startup refusal is checked in a subprocess.
 """
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -316,3 +317,114 @@ def test_list_posts_author_docstring_says_slug():
     doc = (g.list_posts.__doc__ or "").lower()
     assert "slug" in doc
     assert "email" not in doc
+
+# --- check_connection (the auth probe) -------------------------------------
+
+def test_check_connection_admin_proves_key_via_users_me(monkeypatch):
+    monkeypatch.setattr(g, "ADMIN_KEY", "f" * 24 + ":" + "a" * 64)
+    calls = []
+
+    async def fake(url, *args, **kwargs):
+        calls.append(url)
+        if url.endswith("/users/me/"):
+            return True, {"users": [{"name": "Max"}]}
+        return True, {"site": {"title": "T", "version": "6.77",
+                               "url": "https://t.example"}}
+
+    monkeypatch.setattr(g, "_api_get", fake)
+    out = run(g.check_connection())
+    assert "OK" in out
+    assert "Max" in out
+    assert "6.77" in out
+    assert calls[0].endswith("/users/me/")
+
+
+def test_check_connection_admin_bad_key_fails(monkeypatch):
+    monkeypatch.setattr(g, "ADMIN_KEY", "f" * 24 + ":" + "a" * 64)
+    fake = fake_api((False, "Error 401: Unknown Admin API Key"))
+    monkeypatch.setattr(g, "_api_get", fake)
+    out = run(g.check_connection())
+    assert out.startswith("Connection FAILED")
+    assert "401" in out
+
+
+def test_check_connection_admin_malformed_key_no_network(monkeypatch):
+    calls = []
+
+    async def fake(url, *args, **kwargs):
+        calls.append(url)
+        return True, {}
+
+    monkeypatch.setattr(g, "ADMIN_KEY", "no-colon-key")
+    monkeypatch.setattr(g, "_api_get", fake)
+    out = run(g.check_connection())
+    assert "Connection FAILED" in out
+    assert "invalid format" in out
+    assert calls == []
+
+
+def test_check_connection_admin_nonhex_secret_no_network(monkeypatch):
+    calls = []
+
+    async def fake(url, *args, **kwargs):
+        calls.append(url)
+        return True, {}
+
+    monkeypatch.setattr(g, "ADMIN_KEY", "f" * 24 + ":" + "z" * 64)
+    monkeypatch.setattr(g, "_api_get", fake)
+    out = run(g.check_connection())
+    assert "Connection FAILED" in out
+    assert "hex" in out
+    assert calls == []
+
+
+# --- get_page_content --------------------------------------------------------
+
+def _page_reply(lexical=None, html="<p>legacy body</p>"):
+    page = {"id": "a" * 24, "uuid": "u1", "html": html}
+    if lexical is not None:
+        page["lexical"] = lexical
+    return (True, {"pages": [page]})
+
+
+def test_get_page_content_lexical(monkeypatch):
+    monkeypatch.setattr(g, "ADMIN_KEY", "f" * 24 + ":" + "a" * 64)
+    lexical = json.dumps({"root": {"type": "root", "direction": "ltr",
+                                   "format": "", "indent": 0, "version": 1,
+                                   "children": [
+        {"type": "paragraph", "direction": "ltr", "format": "",
+         "indent": 0, "version": 1, "children": [
+            {"type": "extended-text", "version": 1, "mode": "normal",
+             "style": "", "detail": 0, "format": 0,
+             "text": "hello page"}]}]}})
+    fake = fake_api(_page_reply(lexical=lexical))
+    monkeypatch.setattr(g, "_api_get", fake)
+    out = run(g.get_page_content("a" * 24))
+    assert "hello page" in out
+    # admin lexical mode still requests html (the no-lexical fallback needs it)
+    assert fake.calls[0][2]["params"] == {"formats": "html"}
+
+
+def test_get_page_content_html(monkeypatch):
+    monkeypatch.setattr(g, "ADMIN_KEY", "f" * 24 + ":" + "a" * 64)
+    fake = fake_api(_page_reply(html="<p>raw <b>html</b></p>"))
+    monkeypatch.setattr(g, "_api_get", fake)
+    out = run(g.get_page_content("a" * 24, format="html"))
+    assert out == "<p>raw <b>html</b></p>"
+
+
+def test_get_page_content_no_lexical_falls_back_to_html(monkeypatch):
+    monkeypatch.setattr(g, "ADMIN_KEY", "f" * 24 + ":" + "a" * 64)
+    fake = fake_api(_page_reply())  # no lexical field
+    monkeypatch.setattr(g, "_api_get", fake)
+    out = run(g.get_page_content("a" * 24))
+    assert "legacy body" in out
+
+
+def test_get_post_content_lexical_requests_html(monkeypatch):
+    monkeypatch.setattr(g, "ADMIN_KEY", "f" * 24 + ":" + "a" * 64)
+    fake = fake_api((True, {"posts": [{"id": "a" * 24, "lexical": "{}",
+                                       "html": "<p>p</p>"}]}))
+    monkeypatch.setattr(g, "_api_get", fake)
+    run(g.get_post_content("a" * 24))
+    assert fake.calls[0][2]["params"] == {"formats": "html"}

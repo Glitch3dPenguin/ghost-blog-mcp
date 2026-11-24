@@ -3,11 +3,11 @@
 This repository contains a single-file Python MCP (Model Context Protocol) server that
 connects AI agents to a Ghost blog. It speaks to the Ghost **Admin API** (JWT auth,
 read + write) and the Ghost **Content API** (query-key auth, read-only fallback).
-All server logic lives in `ghost_blog_mcp.py` — there is no package structure, test
-suite, or lint config.
+All server logic lives in `ghost_blog_mcp.py` — there is no package structure or lint config. A mocked-HTTP test suite lives in `tests/`.
 
-The server exposes 18 tools: 8 read (`check_connection`, `list_posts`, `get_post`,
-`get_post_content`, `list_pages`, `get_page`, `list_tags`, `list_authors`) and 10
+The server exposes 19 tools: 9 read (`check_connection`, `list_posts`, `get_post`,
+`get_post_content`, `list_pages`, `get_page`, `get_page_content`, `list_tags`,
+`list_authors`) and 10
 write (`create_post`, `update_post`, `set_post_status`, `delete_post`, `create_page`,
 `update_page`, `delete_page`, `create_tag`, `update_tag`, `delete_tag`).
 
@@ -53,8 +53,10 @@ build/verify steps, conventions, API gotchas, deployment, and the changelog.
 
 ## Verifying changes
 
-There is **no test suite and no linter** in this repo. Verify by (run from the
+The gate is the mocked-HTTP test suite plus the checks below (run from the
 workspace root, with the repo in `ghost-blog-mcp/`):
+
+0. `.venv/bin/python3 -m pytest ghost-blog-mcp/tests/ -q` — all tests green.
 
 1. `python3 -m venv .venv && .venv/bin/pip install -r ghost-blog-mcp/requirements.txt`
    (once — the gate scripts below run on `.venv/bin/python3`).
@@ -64,7 +66,7 @@ workspace root, with the repo in `ghost-blog-mcp/`):
    GHOST_URL=https://example.invalid GHOST_ADMIN_KEY=<fake-24-hex>:<fake-64-hex> \
      .venv/bin/python3 -c "import asyncio, sys; sys.path.insert(0, 'ghost-blog-mcp'); import ghost_blog_mcp as m; print([t.name for t in asyncio.run(m.mcp.list_tools())])"
    ```
-   Expect EXACTLY the 18 tool names above. Repeat with `GHOST_CONTENT_KEY` set and
+   Expect EXACTLY the 19 tool names above. Repeat with `GHOST_CONTENT_KEY` set and
    `GHOST_ADMIN_KEY` unset: `list_tools` still returns 18, and the write path's
    configuration check (`_admin_config_problem()`) reports `GHOST_ADMIN_KEY` as
    missing.
@@ -85,9 +87,9 @@ workspace root, with the repo in `ghost-blog-mcp/`):
    tools. Then `HOST=0.0.0.0` with no token -> the process exits at
    start with the refusal message.
 
-The only CI is `.github/workflows/docker-publish.yml` (image build/publish on push
-to `main` and on release) — it does not run any tests, so a broken module is only
-caught by the build step. Be strict about local verification.
+CI runs both on push to `main`: the `Tests` workflow (pytest, the suite above)
+and `docker-publish.yml` (image build/publish, which runs no tests). Be strict
+about local verification — the image build is not a behavior check.
 
 ## Code style and architecture
 
@@ -168,6 +170,13 @@ caught by the build step. Be strict about local verification.
   echo full request URLs with params.
 - Ghost 6's `Accept-Version` header uses minimum-version semantics — send `v6.0`.
 - The Content API only ever returns published posts/pages (drafts are admin-only).
+- **A FAILED create (e.g. a 422 on malformed lexical) inserts the row and does
+  NOT roll back** — orphaned drafts accumulate silently. After a failed create,
+  sweep `list_posts` / `list_pages` for the stray row by title and delete it.
+- `GET /ghost/api/admin/site/` is PUBLIC on Ghost 6 (200 without auth, and even
+  with a broken admin key) — it proves connectivity only, never credentials.
+  `GET /ghost/api/admin/users/me/` is the auth-required probe (401
+  `UNKNOWN_ADMIN_API_KEY` on a bad key).
 - `/images/` is deliberately not exposed (YAGNI for a blog MCP).
 
 ## Tool guidance (for agents consuming this server)
@@ -197,8 +206,8 @@ Recommended workflow:
   every published release it builds the Docker image and pushes it to
   `ghcr.io/glitch3dpenguin/ghost-blog-mcp` with tags `:latest` (default branch),
   semver tags (`:v2.1.0`, `:v2.1`, `:v2`) for tagged releases, and `:sha-<commit>`
-  for traceability. It runs no tests — a broken module is only caught by the build
-  step.
+  for traceability. The `Tests` workflow (pytest) is the behavior check on push;
+  the image build is packaging only.
 - The container serves Streamable HTTP at `http://<host>:8000/` and SSE at
   `http://<host>:8000/sse`.
 - After user-facing changes, update the README (tool tables, endpoint docs) and the
@@ -207,6 +216,9 @@ Recommended workflow:
 ## Changelog
 
 ### Unreleased
+- **New:** `get_page_content` — the full body of one page on demand (the Lexical document parsed to readable text, or raw HTML), mirroring `get_post_content`. Pages now have the same see-half as posts, custom HTML blocks included (19 tools: 9 read, 10 write).
+- **Fix:** `check_connection` in admin mode proves the key against an auth-required endpoint (`GET /users/me/`) — `GET /site/` is public on Ghost 6, so a broken admin key reported green before. Malformed keys (missing parts, non-hex secret) fail cleanly with no network round trip, and the authenticated admin user is reported.
+- **Fix:** `get_post_content` requests `formats=html` in admin mode even for the `lexical` format — the no-lexical fallback (legacy HTML-only content) returned empty text before because the Admin API omits `html` unless asked.
 - **Fix:** `docker-compose.yml` sets `HOST: "0.0.0.0"` and requires `MCP_AUTH_TOKEN` — docker's published port forwards to the container's eth0, so the module's loopback default was unreachable from the host.
 - **Fix:** scheduling success lines ("Scheduled to publish at" / "Publishes at") key on `status == "scheduled"` — every published post carries `published_at`, so the presence check fired for plain publishes.
 - **Fix:** `create_post` only forces `status: scheduled` when `published_at` is set with the default `draft` status; an explicit status wins (backdating works).

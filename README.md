@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/MCP-stdio%20%C2%B7%20streamable--http%20%C2%B7%20sse-8B5CF6" alt="MCP transports" />
   <img src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+" />
   <img src="https://img.shields.io/badge/Ghost-Admin%20%2B%20Content%20API-FF5A00" alt="Ghost Admin + Content API" />
-  <img src="https://img.shields.io/badge/tools-8%20read%20%C2%B7%2010%20write-FF5A00" alt="18 tools" />
+  <img src="https://img.shields.io/badge/tools-9%20read%20%C2%B7%2010%20write-FF5A00" alt="19 tools" />
 </p>
 
 <p align="center">
@@ -27,12 +27,12 @@
 ## Features
 
 - **Context-safe listing** — compact one-line tables (date, status, title, tags, author) for posts, pages, tags, and authors. No bodies in list output, so agents can triage the whole site without context overflow.
-- **On-demand detail fetching** — metadata plus a truncated body preview via `get_post()`, or the full body via `get_post_content()` (the Lexical document parsed to readable text, or raw HTML).
+- **On-demand detail fetching** — metadata plus a truncated body preview via `get_post()`/`get_page()`, or the full body via `get_post_content()`/`get_page_content()` (the Lexical document parsed to readable text, or raw HTML).
 - **Full mode with an admin key** — create, update, publish/schedule, and delete posts, pages, and tags through the Ghost Admin API.
 - **Read-only mode with a content key** — every read tool works with just a Content API key; write tools then report that `GHOST_ADMIN_KEY` is required. No admin key needed to let an agent read your blog.
 - **Stdlib-only admin auth** — the Admin API's HS256 JWT is built with `hmac`/`base64`/`json`; no extra `jwt` dependency.
 - **Draft → confirm pattern** — every write tool's docstring asks the agent to confirm with the user first; posts and pages are live the moment they publish.
-- **Connection check** — verify credentials and connectivity, and report which auth mode (admin / content-only / unconfigured) the server is running in.
+- **Connection check** — verify credentials and connectivity, and report which auth mode (admin / content-only / unconfigured) the server is running in. In admin mode the key must pass an auth-required probe, so a broken admin key fails loudly.
 - **Three transports** — stdio (default), Streamable HTTP, and SSE, selected with `MCP_TRANSPORT`; a Docker image is published to GHCR on every push to `main`.
 
 ---
@@ -43,12 +43,13 @@
 
 | Tool | Description |
 |---|---|
-| `check_connection` | Verify credentials and connectivity, with the current auth mode (admin / content-only / unconfigured) and the site title. Run first when debugging a new setup. |
+| `check_connection` | Verify credentials and connectivity, with the current auth mode (admin / content-only / unconfigured). In admin mode the key is proven against an auth-required endpoint (`GET /users/me/` — a broken key fails loudly) and the authenticated admin user is reported. Run first when debugging a new setup. |
 | `list_posts` | Compact one-line-per-post table: title, status, tags, author, date. Filters: status, tag, author; plus paging and ordering. Drafts are visible in admin mode only. |
 | `get_post` | Metadata + a truncated body preview (default 1500 chars, adjustable) for one post by id or slug. |
 | `get_post_content` | The FULL body of one post, on demand — `lexical` (the Lexical document parsed to readable plain text, default) or `html` (raw). |
 | `list_pages` | Compact table of static pages: title, status, tags, date. |
 | `get_page` | Metadata + a truncated body preview for one static page by id or slug. |
+| `get_page_content` | The FULL body of one static page, on demand — `lexical` (the Lexical document parsed to readable plain text, default) or `html` (raw). Custom HTML blocks are visible here. |
 | `list_tags` | All tags with post/page counts where the API provides them (counts are admin-mode only). |
 | `list_authors` | The site's authors — admin `/users/` in full mode, content `/authors/` in read-only mode. |
 
