@@ -1409,6 +1409,1426 @@ async def delete_tag(tag_id: str) -> str:
 
 
 # ===========================================================================
+# NEWSLETTERS / TIERS / OFFERS / MEMBERS / WEBHOOKS (admin-only groups)
+#
+# These five resources have NO Content API surface — unlike posts/pages,
+# there is no read-only fallback. Write tools get the GHOST_ADMIN_KEY
+# configuration error centralized in the _api_* helpers; read tools check
+# _admin_config_problem() up front and return it when the admin key is
+# missing.
+# ===========================================================================
+
+def _price_label(tier: dict) -> str:
+    """Format a tier's prices (cents strings on the wire) for display."""
+    cur = tier.get("currency") or "USD"
+    parts = []
+    for value, suffix in ((tier.get("monthly_price"), "/mo"),
+                          (tier.get("yearly_price"), "/yr")):
+        if value is None:
+            continue
+        try:
+            parts.append(f"{int(value) / 100:.2f} {cur}{suffix}")
+        except (TypeError, ValueError):
+            parts.append(f"{value} {cur}{suffix}?")
+    return " + ".join(parts) if parts else "free"
+
+
+def _discount_label(offer: dict) -> str:
+    """Human-readable discount summary for one offer row."""
+    t, amt = offer.get("type", "?"), offer.get("amount")
+    if t == "percent":
+        return f"{amt}% off"
+    if t == "tier_free_trial":
+        months = offer.get("duration_in_months")
+        if months:
+            return f"free trial ({months} months)"
+        return f"free trial ({offer.get('duration') or 0} days)"
+    cur = offer.get("currency") or "USD"
+    try:
+        return f"{cur} {int(amt) / 100:.2f} off"
+    except (TypeError, ValueError):
+        return f"{amt} {cur} off"
+
+
+# ===========================================================================
+# NEWSLETTERS
+# ===========================================================================
+
+@mcp.tool(annotations=_READ_ANN)
+async def list_newsletters(
+    limit: int = _DEFAULT_LIMIT,
+    page: int = 1,
+    order: str = "sort_order ASC, name ASC",
+) -> str:
+    """
+    List the site's newsletters (admin key required — newsletters have no
+    Content API surface).
+
+    Args:
+        limit:  Newsletters per page (default 15, max 100).
+        page:   Page number (1-based).
+        order:  e.g. 'sort_order ASC, name ASC' (default), 'created_at DESC'.
+    """
+    problem = _admin_config_problem()
+    if problem:
+        return problem
+    limit = max(1, min(int(limit), 100))
+    page  = max(1, int(page))
+
+    ok, data = await _api_get(f"{ADMIN_BASE}/newsletters/",
+                              params={"limit": limit, "page": page, "order": order,
+                                      "include": "count"}, admin=True)
+    if not ok:
+        return data
+    newsletters = data.get("newsletters") if isinstance(data, dict) else None
+    newsletters = newsletters if isinstance(newsletters, list) else []
+    if not newsletters:
+        return "No newsletters found."
+    meta = data.get("meta") if isinstance(data, dict) else {}
+    pag  = meta.get("pagination") if isinstance(meta, dict) else {}
+    pag  = pag if isinstance(pag, dict) else {}
+
+    lines = [f"Newsletters (page {pag.get('page', page)}/{pag.get('page_count', '?')}, "
+             f"total: {pag.get('total', '?')}):", ""]
+    for n in newsletters:
+        count = n.get("count") if isinstance(n.get("count"), dict) else {}
+        desc  = _truncate(n.get("description") or "", 60)
+        lines.append(f"  {n.get('name', '?')} ({n.get('slug', '?')})  "
+                     f"id={n.get('id') or n.get('uuid') or '?'}  "
+                     f"[{n.get('status', '?')}]  subscribers={count.get('subscribers', 0)}"
+                     + (f"  — {desc}" if desc else ""))
+    lines += ["", "Use these ids with get_newsletter / update_newsletter / delete_newsletter.",
+              "The site's default newsletter cannot be deleted (Ghost rejects it with a 400)."]
+    if pag.get("page_count", 1) > page:
+        lines.append(f"Use list_newsletters(page={page + 1}) for the next page.")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_READ_ANN)
+async def get_newsletter(identifier: str) -> str:
+    """
+    Full metadata for ONE newsletter (by raw id, UUID, or slug).
+
+    Args:
+        identifier: Newsletter id, UUID, or slug (from list_newsletters).
+    """
+    problem = _admin_config_problem()
+    if problem:
+        return problem
+    if not identifier:
+        return "identifier is required."
+    ok, data = await _fetch_item(ADMIN_BASE, "newsletters", identifier, True)
+    if not ok:
+        return f"Error looking up newsletter '{identifier}': {data}"
+    n = _first_item(data, "newsletters")
+    if not n:
+        return f"Newsletter '{identifier}' not found."
+
+    lines = [
+        "=" * 64,
+        f"Newsletter: {n.get('name', '(unnamed)')}  (id={n.get('uuid', '?')})",
+        "=" * 64,
+        f"Slug        : {n.get('slug', '?')}",
+        f"Status      : {n.get('status', '?')}",
+        f"Description : {_truncate(n.get('description') or '', 300) or '-'}",
+        f"Sender      : {n.get('sender_name') or '-'} <{n.get('sender_email') or '-'}>",
+        f"Reply-to    : {n.get('sender_reply_to') or '-'}",
+        f"Subs on sign-up : {'yes' if n.get('subscribe_on_signup') else 'no'}",
+        f"Header      : title={'yes' if n.get('show_header_title') else 'no'}  "
+        f"name={'yes' if n.get('show_header_name') else 'no'}  "
+        f"icon={'yes' if n.get('show_header_icon') else 'no'}",
+        f"Title align : {n.get('title_alignment') or '-'}   "
+        f"feature image: {'yes' if n.get('show_feature_image') else 'no'}",
+        f"Fonts       : title={n.get('title_font_category') or '-'}  "
+        f"body={n.get('body_font_category') or '-'}",
+        f"Badge       : {'yes' if n.get('show_badge') else 'no'}",
+        f"Sort order  : {n.get('sort_order', 0)}",
+        f"Created     : {n.get('created_at', '?')}",
+        f"Updated     : {n.get('updated_at', '?')}",
+        "",
+        "Use this id with update_newsletter / delete_newsletter.",
+    ]
+    footer = n.get("footer_content")
+    if footer:
+        lines.append(f"Footer      : {_truncate(footer, 200)}")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_WRITE_ANN)
+async def create_newsletter(
+    name: str,
+    description: str = "",
+    sender_reply_to: str = "",
+    status: str = "active",
+    subscribe_on_signup: bool | None = None,
+    show_header_icon: bool | None = None,
+    show_header_title: bool | None = None,
+    show_header_name: bool | None = None,
+    title_font_category: str = "",
+    title_alignment: str = "",
+    show_feature_image: bool | None = None,
+    body_font_category: str = "",
+    show_badge: bool | None = None,
+) -> str:
+    """
+    Create a new newsletter.
+
+    IMPORTANT: Confirm with the user before calling — an active newsletter
+    is immediately available for member signups.
+
+    Args:
+        name:               Newsletter name (required, unique).
+        description:        Short description.
+        sender_reply_to:    Reply-to address used for this newsletter.
+        status:             'active' (default) or 'inactive'.
+        subscribe_on_signup:   Whether new members subscribe to this
+                    newsletter automatically (omit = Ghost default).
+        show_header_icon:   Show the site icon in the header.
+        show_header_title:  Show the site title in the header.
+        show_header_name:   Show the newsletter name in the header.
+        title_font_category: 'sans-serif' or 'serif'.
+        title_alignment:    'left' or 'center'.
+        show_feature_image: Show the post feature image in the header.
+        body_font_category: 'sans-serif' or 'serif'.
+        show_badge:         Show the "New" badge on subscribed posts.
+    """
+    if not name.strip():
+        return "name is required."
+    if status not in ("active", "inactive"):
+        return "Invalid status. Use 'active' or 'inactive'."
+    payload = {"name": name.strip(), "status": status}
+    if description.strip():
+        payload["description"] = description.strip()
+    if sender_reply_to.strip():
+        payload["sender_reply_to"] = sender_reply_to.strip()
+    for field, value in (
+        ("subscribe_on_signup", subscribe_on_signup),
+        ("show_header_icon", show_header_icon),
+        ("show_header_title", show_header_title),
+        ("show_header_name", show_header_name),
+        ("show_feature_image", show_feature_image),
+        ("show_badge", show_badge),
+    ):
+        if value is not None:
+            payload[field] = value
+    for field, value in (
+        ("title_font_category", title_font_category),
+        ("title_alignment", title_alignment),
+        ("body_font_category", body_font_category),
+    ):
+        if value.strip():
+            payload[field] = value.strip()
+
+    ok, data = await _api_post(f"{ADMIN_BASE}/newsletters/", {"newsletters": [payload]})
+    if not ok:
+        return data
+    created = _first_item(data, "newsletters") or {}
+    return (f"Newsletter created: '{created.get('name', name)}' "
+            f"(id={created.get('id') or created.get('uuid') or '?'}, "
+            f"slug={created.get('slug', '?')}).")
+
+
+@mcp.tool(annotations=_WRITE_ANN)
+async def update_newsletter(
+    newsletter_id: str,
+    name: str = "",
+    description: str = "",
+    sender_name: str = "",
+    sender_email: str = "",
+    sender_reply_to: str = "",
+    status: str = "",
+    subscribe_on_signup: bool | None = None,
+    show_header_icon: bool | None = None,
+    show_header_title: bool | None = None,
+    show_header_name: bool | None = None,
+    title_font_category: str = "",
+    title_alignment: str = "",
+    show_feature_image: bool | None = None,
+    body_font_category: str = "",
+    show_badge: bool | None = None,
+    sort_order: int | None = None,
+    header_image: str = "",
+    footer_content: str = "",
+) -> str:
+    """
+    Update an existing newsletter — omit a field to leave it unchanged.
+
+    IMPORTANT: Confirm with the user before calling.
+
+    Args:
+        newsletter_id:     Newsletter id, UUID, or slug (from list_newsletters).
+        name:              New name.
+        description:       New description.
+        sender_name:       New sender name.
+        sender_email:      New sender email.
+        sender_reply_to:   New reply-to address.
+        status:            'active' or 'inactive'.
+        subscribe_on_signup:   Member sign-up toggle (omit = unchanged).
+        show_header_icon / show_header_title / show_header_name:
+                    Header display toggles (omit = unchanged).
+        title_font_category: 'sans-serif' or 'serif'.
+        title_alignment:    'left' or 'center'.
+        show_feature_image: Feature image toggle.
+        body_font_category: 'sans-serif' or 'serif'.
+        show_badge:         "New" badge toggle.
+        sort_order:        Ordering position in the newsletter list.
+        header_image:      URL of a custom header image.
+        footer_content:    HTML shown in the newsletter footer.
+    """
+    if not newsletter_id:
+        return "newsletter_id is required."
+    if status and status not in ("active", "inactive"):
+        return "Invalid status. Use 'active' or 'inactive'."
+    payload = {}
+    for field, value in (
+        ("name", name), ("description", description), ("sender_name", sender_name),
+        ("sender_email", sender_email), ("sender_reply_to", sender_reply_to),
+        ("title_font_category", title_font_category), ("title_alignment", title_alignment),
+        ("body_font_category", body_font_category),
+    ):
+        if value.strip():
+            payload[field] = value.strip()
+    if status:
+        payload["status"] = status
+    for field, value in (
+        ("subscribe_on_signup", subscribe_on_signup),
+        ("show_header_icon", show_header_icon),
+        ("show_header_title", show_header_title),
+        ("show_header_name", show_header_name),
+        ("show_feature_image", show_feature_image),
+        ("show_badge", show_badge),
+    ):
+        if value is not None:
+            payload[field] = value
+    if sort_order is not None:
+        payload["sort_order"] = sort_order
+    if header_image.strip():
+        payload["header_image"] = header_image.strip()
+    if footer_content.strip():
+        payload["footer_content"] = footer_content.strip()
+    if not payload:
+        return "Nothing to update — provide at least one field."
+
+    ok, raw_id = await _resolve_raw_id("newsletters", newsletter_id)
+    if not ok:
+        return f"Error resolving newsletter id '{newsletter_id}': {raw_id}"
+    ok, data = await _api_post(f"{ADMIN_BASE}/newsletters/{raw_id}/",
+                               {"newsletters": [payload]}, method="PUT")
+    if not ok:
+        return data
+    updated = _first_item(data, "newsletters") or {}
+    return (f"Newsletter updated: '{updated.get('name', '?')}' "
+            f"(id={updated.get('id') or newsletter_id}).")
+
+
+@mcp.tool(annotations=_DELETE_ANN)
+async def delete_newsletter(newsletter_id: str) -> str:
+    """
+    Permanently delete a newsletter. This cannot be undone — posts that
+    referenced it fall back to the site's default newsletter. (The default
+    newsletter itself cannot be deleted; Ghost rejects that with a 400.)
+
+    IMPORTANT: Confirm the newsletter id and the deletion with the user
+    before calling.
+
+    Args:
+        newsletter_id: Newsletter id, UUID, or slug (from list_newsletters).
+    """
+    if not newsletter_id:
+        return "newsletter_id is required."
+    denied = _delete_gate()
+    if denied:
+        return denied
+    ok, raw_id = await _resolve_raw_id("newsletters", newsletter_id)
+    if not ok:
+        return f"Error resolving newsletter id '{newsletter_id}': {raw_id}"
+    ok, data = await _api_delete(f"{ADMIN_BASE}/newsletters/{raw_id}/")
+    if not ok:
+        return data
+    return f"Newsletter deleted (id={newsletter_id}). This cannot be undone."
+
+
+# ===========================================================================
+# TIERS (membership plans)
+# ===========================================================================
+
+@mcp.tool(annotations=_READ_ANN)
+async def list_tiers(limit: int = _DEFAULT_LIMIT, page: int = 1, order: str = "created_at ASC") -> str:
+    """
+    List the site's membership tiers with prices (admin key required —
+    tiers have no Content API surface).
+
+    Args:
+        limit:  Tiers per page (default 15, max 100).
+        page:   Page number (1-based).
+        order:  e.g. 'created_at ASC' (default), 'name ASC'.
+    """
+    problem = _admin_config_problem()
+    if problem:
+        return problem
+    limit = max(1, min(int(limit), 100))
+    page  = max(1, int(page))
+
+    ok, data = await _api_get(f"{ADMIN_BASE}/tiers/",
+                              params={"limit": limit, "page": page, "order": order,
+                                      "include": "count"}, admin=True)
+    if not ok:
+        return data
+    tiers = data.get("tiers") if isinstance(data, dict) else None
+    tiers = tiers if isinstance(tiers, list) else []
+    if not tiers:
+        return "No tiers found."
+    meta = data.get("meta") if isinstance(data, dict) else {}
+    pag  = meta.get("pagination") if isinstance(meta, dict) else {}
+    pag  = pag if isinstance(pag, dict) else {}
+
+    lines = [f"Tiers (page {pag.get('page', page)}/{pag.get('page_count', '?')}, "
+             f"total: {pag.get('total', '?')}):", ""]
+    for t in tiers:
+        count = t.get("count") if isinstance(t.get("count"), dict) else {}
+        benefits = _truncate(", ".join(t.get("benefits") or []), 60)
+        lines.append(f"  {t.get('name', '?')} ({t.get('slug', '?')})  "
+                     f"id={t.get('id') or t.get('uuid') or '?'}  "
+                     f"[{t.get('visibility', '?')}]  {_price_label(t)}  "
+                     f"members={count.get('members', 0)}"
+                     + (f"  — {benefits}" if benefits else ""))
+    lines += ["", "Use these ids with get_tier / update_tier / delete_tier, "
+              "and create_offer(tier_id=...) for discounts."]
+    if pag.get("page_count", 1) > page:
+        lines.append(f"Use list_tiers(page={page + 1}) for the next page.")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_READ_ANN)
+async def get_tier(identifier: str) -> str:
+    """
+    Full metadata for ONE membership tier (by raw id, UUID, or slug).
+
+    Args:
+        identifier: Tier id, UUID, or slug (from list_tiers).
+    """
+    problem = _admin_config_problem()
+    if problem:
+        return problem
+    if not identifier:
+        return "identifier is required."
+    ok, data = await _fetch_item(ADMIN_BASE, "tiers", identifier, True)
+    if not ok:
+        return f"Error looking up tier '{identifier}': {data}"
+    t = _first_item(data, "tiers")
+    if not t:
+        return f"Tier '{identifier}' not found."
+
+    cur = t.get("currency") or "USD"
+    lines = [
+        "=" * 64,
+        f"Tier: {t.get('name', '(unnamed)')}  (id={t.get('uuid', '?')})",
+        "=" * 64,
+        f"Slug          : {t.get('slug', '?')}",
+        f"Visibility    : {t.get('visibility', '?')}   (public = offered on the site, internal = hidden)",
+        f"Monthly price : {t.get('monthly_price', '?')} cents ({cur})",
+        f"Yearly price  : {t.get('yearly_price', '?')} cents ({cur})",
+        f"Welcome URL   : {t.get('welcome_page_url') or '-'}",
+        f"Description   : {_truncate(t.get('description') or '', 300) or '-'}",
+        f"Benefits      : {_truncate(', '.join(t.get('benefits') or []), 300) or '-'}",
+        f"Created       : {t.get('created_at', '?')}",
+        f"Updated       : {t.get('updated_at', '?')}",
+        "",
+        "Use this id with create_offer(tier_id=...) / update_tier / delete_tier.",
+    ]
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_WRITE_ANN)
+async def create_tier(
+    name: str,
+    description: str = "",
+    welcome_page_url: str = "",
+    visibility: str = "public",
+    monthly_price: str = "",
+    yearly_price: str = "",
+    currency: str = "USD",
+    benefits: list | None = None,
+) -> str:
+    """
+    Create a new membership tier.
+
+    IMPORTANT: Confirm with the user before calling — a public tier is
+    immediately offered to subscribers.
+
+    Args:
+        name:             Tier name (required, unique).
+        description:      Shown to subscribers.
+        welcome_page_url: URL the member is taken to after subscribing.
+        visibility:       'public' (default) or 'internal' (hidden from the site).
+        monthly_price:    Monthly price in CENTS as a string, e.g. '1000' = $10.00
+                          (omit for a free monthly price).
+        yearly_price:     Yearly price in cents as a string, e.g. '9600' = $96.00.
+        currency:         ISO 4217 code, default USD.
+        benefits:         List of benefit strings shown on the pricing page.
+    """
+    if not name.strip():
+        return "name is required."
+    if visibility not in ("public", "internal"):
+        return "Invalid visibility. Use 'public' or 'internal'."
+    for label, value in (("monthly_price", monthly_price), ("yearly_price", yearly_price)):
+        if value.strip() and not value.strip().isdigit():
+            return (f"{label} must be a non-negative integer in cents "
+                    "(e.g. '1000' for $10.00).")
+    payload = {"name": name.strip(), "visibility": visibility}
+    if description.strip():
+        payload["description"] = description.strip()
+    if welcome_page_url.strip():
+        payload["welcome_page_url"] = welcome_page_url.strip()
+    if monthly_price.strip():
+        payload["monthly_price"] = monthly_price.strip()
+    if yearly_price.strip():
+        payload["yearly_price"] = yearly_price.strip()
+    if currency.strip():
+        payload["currency"] = currency.strip().upper()
+    if benefits:
+        payload["benefits"] = [b.strip() for b in benefits if b and b.strip()]
+
+    ok, data = await _api_post(f"{ADMIN_BASE}/tiers/", {"tiers": [payload]})
+    if not ok:
+        return data
+    created = _first_item(data, "tiers") or {}
+    return (f"Tier created: '{created.get('name', name)}' "
+            f"(id={created.get('id') or created.get('uuid') or '?'}, "
+            f"slug={created.get('slug', '?')}).")
+
+
+@mcp.tool(annotations=_WRITE_ANN)
+async def update_tier(
+    tier_id: str,
+    name: str = "",
+    description: str = "",
+    welcome_page_url: str = "",
+    visibility: str = "",
+    monthly_price: str = "",
+    yearly_price: str = "",
+    currency: str = "",
+    benefits: list | None = None,
+) -> str:
+    """
+    Update an existing membership tier — omit a field to leave it unchanged.
+
+    IMPORTANT: Confirm with the user before calling — price changes affect
+    the next billing cycle for subscribers.
+
+    Args:
+        tier_id:          Tier id, UUID, or slug (from list_tiers).
+        name:             New name.
+        description:      New description.
+        welcome_page_url: New welcome URL.
+        visibility:       'public' or 'internal'.
+        monthly_price:    New monthly price in cents as a string ('' = unchanged;
+                          pass '0' for free).
+        yearly_price:     New yearly price in cents as a string.
+        currency:         New ISO 4217 code.
+        benefits:         REPLACES all benefits (omit = unchanged, empty
+                          list = clear all).
+    """
+    if not tier_id:
+        return "tier_id is required."
+    if visibility and visibility not in ("public", "internal"):
+        return "Invalid visibility. Use 'public' or 'internal'."
+    payload = {}
+    for field, value in (
+        ("name", name), ("description", description), ("welcome_page_url", welcome_page_url),
+    ):
+        if value.strip():
+            payload[field] = value.strip()
+    if visibility:
+        payload["visibility"] = visibility
+    for label, value in (("monthly_price", monthly_price), ("yearly_price", yearly_price)):
+        if value:
+            v = value.strip()
+            if not v.isdigit():
+                return f"{label} must be a non-negative integer in cents (e.g. '0' for free)."
+            payload[label] = v
+    if currency.strip():
+        payload["currency"] = currency.strip().upper()
+    if benefits is not None:
+        payload["benefits"] = [b.strip() for b in benefits if b and b.strip()]
+    if not payload:
+        return "Nothing to update — provide at least one field."
+
+    ok, raw_id = await _resolve_raw_id("tiers", tier_id)
+    if not ok:
+        return f"Error resolving tier id '{tier_id}': {raw_id}"
+    ok, data = await _api_post(f"{ADMIN_BASE}/tiers/{raw_id}/", {"tiers": [payload]},
+                               method="PUT")
+    if not ok:
+        return data
+    updated = _first_item(data, "tiers") or {}
+    return f"Tier updated: '{updated.get('name', '?')}' (id={updated.get('id') or tier_id})."
+
+
+@mcp.tool(annotations=_DELETE_ANN)
+async def delete_tier(tier_id: str) -> str:
+    """
+    Permanently delete a membership tier. This cannot be undone — tiers
+    with active paid subscriptions may be rejected by Ghost until the
+    subscriptions are moved or cancelled.
+
+    IMPORTANT: Confirm the tier id and the deletion with the user before
+    calling.
+
+    Args:
+        tier_id: Tier id, UUID, or slug (from list_tiers).
+    """
+    if not tier_id:
+        return "tier_id is required."
+    denied = _delete_gate()
+    if denied:
+        return denied
+    ok, raw_id = await _resolve_raw_id("tiers", tier_id)
+    if not ok:
+        return f"Error resolving tier id '{tier_id}': {raw_id}"
+    ok, data = await _api_delete(f"{ADMIN_BASE}/tiers/{raw_id}/")
+    if not ok:
+        return data
+    return f"Tier deleted (id={tier_id}). This cannot be undone."
+
+
+# ===========================================================================
+# OFFERS (membership discounts)
+#
+# Offers have no slugs — they are referenced by raw id, UUID, or CODE, so
+# the generic slug-fallback resolution in _fetch_item/_resolve_raw_id does
+# not apply. The local helpers below use filter=code: for unknowns.
+# ===========================================================================
+
+async def _fetch_offer(identifier: str):
+    """Fetch one offer by raw id, UUID, or code."""
+    if _UUID_RE.match(identifier):
+        return await _api_get(f"{ADMIN_BASE}/offers/",
+                              params={"filter": f"uuid:{identifier}"})
+    if re.fullmatch(r"[0-9a-f]{24}", identifier, flags=re.IGNORECASE):
+        return await _api_get(f"{ADMIN_BASE}/offers/{identifier}/")
+    return await _api_get(f"{ADMIN_BASE}/offers/",
+                          params={"filter": f"code:{identifier}"})
+
+
+async def _resolve_offer_id(identifier: str):
+    """Resolve an offer identifier to the RAW ObjectID Ghost 6 path params
+    require (raw ids pass through; UUIDs and codes are looked up)."""
+    if re.fullmatch(r"[0-9a-f]{24}", identifier, flags=re.IGNORECASE):
+        return True, identifier
+    ok, data = await _fetch_offer(identifier)
+    if not ok:
+        return False, data
+    item = _first_item(data, "offers")
+    if not item or not item.get("id"):
+        return False, f"'{identifier}' not found (checked as raw id, UUID, and code)."
+    return True, item["id"]
+
+
+@mcp.tool(annotations=_READ_ANN)
+async def list_offers(
+    limit: int = _DEFAULT_LIMIT,
+    page: int = 1,
+    order: str = "created_at DESC",
+    status: str = "",
+) -> str:
+    """
+    List the site's offers/discounts for membership tiers (admin key
+    required).
+
+    Args:
+        limit:  Offers per page (default 15, max 100).
+        page:   Page number (1-based).
+        order:  e.g. 'created_at DESC' (default), 'name ASC'.
+        status: 'active', 'draft', or 'archived' (omit = all).
+    """
+    problem = _admin_config_problem()
+    if problem:
+        return problem
+    if status and status not in ("active", "draft", "archived"):
+        return "Invalid status. Use 'active', 'draft', or 'archived'."
+    limit = max(1, min(int(limit), 100))
+    page  = max(1, int(page))
+
+    params = {"limit": limit, "page": page, "order": order, "include": "tiers"}
+    if status:
+        params["filter"] = f"status:{status}"
+    ok, data = await _api_get(f"{ADMIN_BASE}/offers/", params=params, admin=True)
+    if not ok:
+        return data
+    offers = data.get("offers") if isinstance(data, dict) else None
+    offers = offers if isinstance(offers, list) else []
+    if not offers:
+        return "No offers found."
+    meta = data.get("meta") if isinstance(data, dict) else {}
+    pag  = meta.get("pagination") if isinstance(meta, dict) else {}
+    pag  = pag if isinstance(pag, dict) else {}
+
+    lines = [f"Offers (page {pag.get('page', page)}/{pag.get('page_count', '?')}, "
+             f"total: {pag.get('total', '?')}):", ""]
+    for o in offers:
+        tier = o.get("tier") if isinstance(o.get("tier"), dict) else {}
+        tier_name = tier.get("name") or tier.get("id") or o.get("tier_id") or "?"
+        lines.append(f"  code={o.get('code', '?')}  {_truncate(str(o.get('name', '?')), 30)}  "
+                     f"[{o.get('status', '?')}]  {o.get('type', '?')} ({o.get('cadence', '?')})  "
+                     f"{_discount_label(o)}  tier={tier_name}  "
+                     f"id={o.get('id') or o.get('uuid') or '?'}")
+    lines += ["", "Use get_offer(<code-or-id>) for details; "
+              "create_offer(tier_id=...) with a tier id from list_tiers."]
+    if pag.get("page_count", 1) > page:
+        lines.append(f"Use list_offers(page={page + 1}) for the next page.")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_READ_ANN)
+async def get_offer(identifier: str) -> str:
+    """
+    Full metadata for ONE offer (by raw id, UUID, or offer CODE).
+
+    Args:
+        identifier: Offer id, UUID, or code (from list_offers).
+    """
+    problem = _admin_config_problem()
+    if problem:
+        return problem
+    if not identifier:
+        return "identifier is required."
+    ok, data = await _fetch_offer(identifier)
+    if not ok:
+        return f"Error looking up offer '{identifier}': {data}"
+    o = _first_item(data, "offers")
+    if not o:
+        return f"Offer '{identifier}' not found (checked raw id, UUID, and code)."
+
+    tier = o.get("tier") if isinstance(o.get("tier"), dict) else {}
+    lines = [
+        "=" * 64,
+        f"Offer: {o.get('name', '(unnamed)')}  (id={o.get('uuid', '?')})",
+        "=" * 64,
+        f"Code            : {o.get('code', '?')}",
+        f"Status          : {o.get('status', '?')}",
+        f"Type            : {o.get('type', '?')}   ({o.get('cadence', '?')})",
+        f"Discount        : {_discount_label(o)}  (raw amount: {o.get('amount', '?')})",
+        f"Duration        : {o.get('duration', '?')} days"
+        + (f"  ({o.get('duration_in_months')} months)" if o.get("duration_in_months") else ""),
+        f"Tier            : {tier.get('name') or o.get('tier_id') or '?'} "
+        f"(id={tier.get('id') or o.get('tier_id') or '?'})",
+        f"Display title   : {o.get('display_title') or '-'}",
+        f"Display desc    : {_truncate(o.get('display_description') or '', 200) or '-'}",
+        f"Created         : {o.get('created_at', '?')}",
+        f"Updated         : {o.get('updated_at', '?')}",
+        "",
+        "Use this id/code with update_offer / delete_offer.",
+    ]
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_WRITE_ANN)
+async def create_offer(
+    name: str,
+    code: str,
+    type: str,
+    tier_id: str,
+    amount: float,
+    cadence: str = "once",
+    duration: int = 0,
+    duration_in_months: int | None = None,
+    currency: str = "",
+    display_title: str = "",
+    display_description: str = "",
+) -> str:
+    """
+    Create a new offer (discount) for a membership tier.
+
+    IMPORTANT: Confirm with the user before calling — an active offer's
+    code is redeemable by members immediately.
+
+    Args:
+        name:      Offer name (required).
+        code:      The coupon code members redeem (required, unique).
+        type:      'percent' (percentage off), 'amount' (fixed amount off),
+                   'one_time' (one-time discount), 'tier_free_trial'
+                   (free trial of the tier), or 'tier_discount'.
+        tier_id:   Tier the offer applies to (from list_tiers).
+        amount:    The discount amount — for 'percent' offers the percent
+                   value (e.g. 10 = 10%); for money offers, cents
+                   (e.g. 1000 = $10.00); 0 for a free trial.
+        cadence:   'once' (default), 'monthly', or 'yearly'.
+        duration:  Validity / trial length in days (0 = none).
+        duration_in_months: Trial length in months (free trials).
+        currency:  ISO 4217 code for money offers (default: the tier's).
+        display_title:       Shown to members where the offer appears.
+        display_description: Shown to members where the offer appears.
+    """
+    if not name.strip():
+        return "name is required."
+    if not code.strip():
+        return "code is required."
+    if type not in ("one_time", "percent", "amount", "tier_free_trial", "tier_discount"):
+        return ("Invalid type. Use 'one_time', 'percent', 'amount', "
+                "'tier_free_trial', or 'tier_discount'.")
+    if cadence not in ("once", "monthly", "yearly"):
+        return "Invalid cadence. Use 'once', 'monthly', or 'yearly'."
+    if not tier_id.strip():
+        return "tier_id is required (from list_tiers)."
+    if amount is None or amount < 0:
+        return "amount must be a non-negative number."
+    if type in ("percent", "amount", "tier_discount") and amount == 0:
+        return "amount must be positive for this offer type."
+
+    payload = {"name": name.strip(), "code": code.strip(), "type": type,
+               "cadence": cadence, "duration": int(duration),
+               "amount": amount, "tier_id": tier_id.strip()}
+    if duration_in_months is not None:
+        payload["duration_in_months"] = int(duration_in_months)
+    if currency.strip():
+        payload["currency"] = currency.strip().upper()
+    if display_title.strip():
+        payload["display_title"] = display_title.strip()
+    if display_description.strip():
+        payload["display_description"] = display_description.strip()
+
+    ok, data = await _api_post(f"{ADMIN_BASE}/offers/", {"offers": [payload]})
+    if not ok:
+        return data
+    created = _first_item(data, "offers") or {}
+    return (f"Offer created: '{created.get('name', name)}' code={created.get('code', code)} "
+            f"(id={created.get('id') or created.get('uuid') or '?'}, "
+            f"status={created.get('status', 'active')}).")
+
+
+@mcp.tool(annotations=_WRITE_ANN)
+async def update_offer(
+    offer_id: str,
+    name: str = "",
+    code: str = "",
+    display_title: str = "",
+    display_description: str = "",
+) -> str:
+    """
+    Update an existing offer — the API exposes name, code, and the
+    display fields; to change the discount itself, delete and recreate
+    the offer. Omit a field to leave it unchanged.
+
+    IMPORTANT: Confirm with the user before calling.
+
+    Args:
+        offer_id:            Offer id, UUID, or code (from list_offers).
+        name:                New name.
+        code:                New coupon code.
+        display_title:       New display title.
+        display_description: New display description.
+    """
+    if not offer_id:
+        return "offer_id is required."
+    payload = {}
+    for field, value in (
+        ("name", name), ("code", code),
+        ("display_title", display_title), ("display_description", display_description),
+    ):
+        if value.strip():
+            payload[field] = value.strip()
+    if not payload:
+        return "Nothing to update — provide name, code, and/or display fields."
+
+    ok, raw_id = await _resolve_offer_id(offer_id)
+    if not ok:
+        return f"Error resolving offer '{offer_id}': {raw_id}"
+    ok, data = await _api_post(f"{ADMIN_BASE}/offers/{raw_id}/", {"offers": [payload]},
+                               method="PUT")
+    if not ok:
+        return data
+    updated = _first_item(data, "offers") or {}
+    return f"Offer updated: '{updated.get('name', '?')}' (code={updated.get('code') or offer_id})."
+
+
+@mcp.tool(annotations=_DELETE_ANN)
+async def delete_offer(offer_id: str) -> str:
+    """
+    Permanently delete an offer. This cannot be undone — members holding
+    the code lose the discount.
+
+    IMPORTANT: Confirm the offer and the deletion with the user before
+    calling.
+
+    Args:
+        offer_id: Offer id, UUID, or code (from list_offers).
+    """
+    if not offer_id:
+        return "offer_id is required."
+    denied = _delete_gate()
+    if denied:
+        return denied
+    ok, raw_id = await _resolve_offer_id(offer_id)
+    if not ok:
+        return f"Error resolving offer '{offer_id}': {raw_id}"
+    ok, data = await _api_delete(f"{ADMIN_BASE}/offers/{raw_id}/")
+    if not ok:
+        return data
+    return f"Offer deleted ({offer_id}). This cannot be undone."
+
+
+# ===========================================================================
+# MEMBERS (newsletter subscribers)
+#
+# Members have no slugs — they are referenced by raw id, UUID, or EMAIL,
+# so the local helpers below use filter=email: for unknowns.
+# ===========================================================================
+
+async def _fetch_member(identifier: str):
+    """Fetch one member by raw id, UUID, or email address."""
+    if _UUID_RE.match(identifier):
+        return await _api_get(f"{ADMIN_BASE}/members/",
+                              params={"filter": f"uuid:{identifier}"})
+    if re.fullmatch(r"[0-9a-f]{24}", identifier, flags=re.IGNORECASE):
+        return await _api_get(f"{ADMIN_BASE}/members/{identifier}/")
+    return await _api_get(f"{ADMIN_BASE}/members/",
+                          params={"filter": f"email:{identifier}"})
+
+
+async def _resolve_member_id(identifier: str):
+    """Resolve a member identifier to the RAW ObjectID Ghost 6 path params
+    require (raw ids pass through; UUIDs and emails are looked up)."""
+    if re.fullmatch(r"[0-9a-f]{24}", identifier, flags=re.IGNORECASE):
+        return True, identifier
+    ok, data = await _fetch_member(identifier)
+    if not ok:
+        return False, data
+    item = _first_item(data, "members")
+    if not item or not item.get("id"):
+        return False, f"'{identifier}' not found (checked as raw id, UUID, and email)."
+    return True, item["id"]
+
+
+@mcp.tool(annotations=_READ_ANN)
+async def list_members(
+    limit: int = _DEFAULT_LIMIT,
+    page: int = 1,
+    order: str = "created_at DESC",
+    label: str = "",
+    status: str = "",
+) -> str:
+    """
+    List the site's newsletter members (admin key required).
+
+    Args:
+        limit:  Members per page (default 15, max 100).
+        page:   Page number (1-based).
+        order:  e.g. 'created_at DESC' (default), 'subscribed_at DESC'.
+        label:  Filter by label name (e.g. 'customers').
+        status: 'free' or 'paid'.
+    """
+    problem = _admin_config_problem()
+    if problem:
+        return problem
+    if status and status not in ("free", "paid"):
+        return "Invalid status. Use 'free' or 'paid'."
+    limit = max(1, min(int(limit), 100))
+    page  = max(1, int(page))
+
+    clauses = []
+    if label.strip():
+        clauses.append(f"label:{label.strip()}")
+    if status:
+        clauses.append(f"status:{status}")
+    params = {"limit": limit, "page": page, "order": order, "include": "labels"}
+    if clauses:
+        params["filter"] = " ".join(clauses)
+    ok, data = await _api_get(f"{ADMIN_BASE}/members/", params=params, admin=True)
+    if not ok:
+        return data
+    members = data.get("members") if isinstance(data, dict) else None
+    members = members if isinstance(members, list) else []
+    if not members:
+        return "No members found."
+    meta = data.get("meta") if isinstance(data, dict) else {}
+    pag  = meta.get("pagination") if isinstance(meta, dict) else {}
+    pag  = pag if isinstance(pag, dict) else {}
+
+    lines = [f"Members (page {pag.get('page', page)}/{pag.get('page_count', '?')}, "
+             f"total: {pag.get('total', '?')}):"]
+    if clauses:
+        lines[0] += f"  [filter: {' '.join(clauses)}]"
+    lines.append("")
+    for m in members:
+        labels = _tag_names(m.get("labels"))
+        lines.append(f"  {m.get('email', '?')}  {str(m.get('name') or '-')[:20]:<20}  "
+                     f"[{m.get('status', '?')}]  {labels or '-'}  "
+                     f"id={m.get('id') or m.get('uuid') or '?'}")
+    lines += ["", "Use get_member(<email-or-id>) for details; the email works with "
+              "update_member / delete_member."]
+    if pag.get("page_count", 1) > page:
+        lines.append(f"Use list_members(page={page + 1}) for the next page.")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_READ_ANN)
+async def get_member(identifier: str) -> str:
+    """
+    Full details for ONE member (by EMAIL address, raw id, or UUID).
+
+    Args:
+        identifier: Member email (from list_members), raw id, or UUID.
+    """
+    problem = _admin_config_problem()
+    if problem:
+        return problem
+    if not identifier:
+        return "identifier is required."
+    ok, data = await _fetch_member(identifier)
+    if not ok:
+        return f"Error looking up member '{identifier}': {data}"
+    m = _first_item(data, "members")
+    if not m:
+        return f"Member '{identifier}' not found (checked raw id, UUID, and email)."
+
+    lines = [
+        "=" * 64,
+        f"Member: {m.get('name') or '(no name)'} <{m.get('email', '?')}>  "
+        f"(id={m.get('uuid', '?')})",
+        "=" * 64,
+        f"Status    : {m.get('status', '?')}",
+        f"Subscribed: {'yes' if m.get('subscribed') else 'no'}",
+        f"Labels    : {_tag_names(m.get('labels')) or '-'}",
+        f"Note      : {_truncate(m.get('note') or '', 300) or '-'}",
+        f"Created   : {m.get('created_at', '?')}",
+        f"Updated   : {m.get('updated_at', '?')}",
+        "",
+        "Use the email or id with update_member / delete_member.",
+    ]
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_WRITE_ANN)
+async def create_member(
+    email: str,
+    name: str = "",
+    note: str = "",
+    labels: list | None = None,
+    newsletters: list | None = None,
+) -> str:
+    """
+    Sign up a member (add a subscriber to the newsletter).
+
+    IMPORTANT: Confirm with the user before calling — this is a real
+    subscriber on the site.
+
+    Args:
+        email:       Member email (required).
+        name:        Display name.
+        note:        Internal note (only visible in the Ghost admin).
+        labels:      List of label names (labels are created if they do
+                     not exist yet).
+        newsletters: List of newsletter ids (from list_newsletters) to
+                     subscribe to — omit for the site default.
+    """
+    if not email.strip() or "@" not in email:
+        return "A valid email address is required."
+    payload = {"email": email.strip()}
+    if name.strip():
+        payload["name"] = name.strip()
+    if note.strip():
+        payload["note"] = note.strip()
+    if labels:
+        payload["labels"] = [{"name": l.strip()} for l in labels if l and l.strip()]
+    if newsletters:
+        payload["newsletters"] = [{"id": n.strip()} for n in newsletters if n and n.strip()]
+
+    ok, data = await _api_post(f"{ADMIN_BASE}/members/", {"members": [payload]})
+    if not ok:
+        return data
+    created = _first_item(data, "members") or {}
+    return (f"Member signed up: {created.get('email', email)} "
+            f"(id={created.get('id') or created.get('uuid') or '?'}, "
+            f"status={created.get('status', 'free')}).")
+
+
+@mcp.tool(annotations=_WRITE_ANN)
+async def update_member(
+    member_id: str,
+    name: str = "",
+    note: str = "",
+    labels: list | None = None,
+    newsletters: list | None = None,
+) -> str:
+    """
+    Update an existing member. A member's EMAIL CANNOT be changed — to
+    fix an email typo, delete the member and sign them up again.
+
+    IMPORTANT: Confirm with the user before calling.
+
+    Args:
+        member_id:   Member email, raw id, or UUID (from list_members / get_member).
+        name:        New display name.
+        note:        New internal note.
+        labels:      REPLACES all labels (omit = unchanged, empty list =
+                     clear all).
+        newsletters: REPLACES all newsletter subscriptions with the given
+                     ids (omit = unchanged, empty list = unsubscribe from
+                     all).
+    """
+    if not member_id:
+        return "member_id is required."
+    payload = {}
+    if name.strip():
+        payload["name"] = name.strip()
+    if note.strip():
+        payload["note"] = note.strip()
+    if labels is not None:
+        payload["labels"] = [{"name": l.strip()} for l in labels if l and l.strip()]
+    if newsletters is not None:
+        payload["newsletters"] = [{"id": n.strip()} for n in newsletters if n and n.strip()]
+    if not payload:
+        return "Nothing to update — provide name, note, labels, and/or newsletters."
+
+    ok, raw_id = await _resolve_member_id(member_id)
+    if not ok:
+        return f"Error resolving member '{member_id}': {raw_id}"
+    ok, data = await _api_post(f"{ADMIN_BASE}/members/{raw_id}/", {"members": [payload]},
+                               method="PUT")
+    if not ok:
+        return data
+    updated = _first_item(data, "members") or {}
+    return (f"Member updated: {updated.get('email') or member_id} "
+            f"(id={updated.get('id') or member_id}).")
+
+
+@mcp.tool(annotations=_DELETE_ANN)
+async def delete_member(member_id: str) -> str:
+    """
+    Remove (unsubscribe) a member. This cannot be undone — the member must
+    sign up again, and any paid tier subscription ends with the deletion.
+
+    IMPORTANT: Confirm the member and the deletion with the user before
+    calling.
+
+    Args:
+        member_id: Member email, raw id, or UUID (from list_members).
+    """
+    if not member_id:
+        return "member_id is required."
+    denied = _delete_gate()
+    if denied:
+        return denied
+    ok, raw_id = await _resolve_member_id(member_id)
+    if not ok:
+        return f"Error resolving member '{member_id}': {raw_id}"
+    ok, data = await _api_delete(f"{ADMIN_BASE}/members/{raw_id}/")
+    if not ok:
+        return data
+    return f"Member removed ({member_id}). This cannot be undone."
+
+
+# ===========================================================================
+# WEBHOOKS
+#
+# Webhooks have no slugs or codes — raw id or UUID only.
+# ===========================================================================
+
+async def _fetch_webhook(identifier: str):
+    """Fetch one webhook by raw id or UUID."""
+    if _UUID_RE.match(identifier):
+        return await _api_get(f"{ADMIN_BASE}/webhooks/",
+                              params={"filter": f"uuid:{identifier}"})
+    if re.fullmatch(r"[0-9a-f]{24}", identifier, flags=re.IGNORECASE):
+        return await _api_get(f"{ADMIN_BASE}/webhooks/{identifier}/")
+    return False, ("Webhooks are referenced by their raw id or UUID (from "
+                   f"list_webhooks) — '{identifier}' is neither.")
+
+
+async def _resolve_webhook_id(identifier: str):
+    """Resolve a webhook identifier to the RAW ObjectID Ghost 6 path params
+    require (raw ids pass through; UUIDs are looked up)."""
+    if re.fullmatch(r"[0-9a-f]{24}", identifier, flags=re.IGNORECASE):
+        return True, identifier
+    ok, data = await _fetch_webhook(identifier)
+    if not ok:
+        return False, data
+    item = _first_item(data, "webhooks")
+    if not item or not item.get("id"):
+        return False, f"'{identifier}' not found (webhooks take their raw id or UUID)."
+    return True, item["id"]
+
+
+@mcp.tool(annotations=_READ_ANN)
+async def list_webhooks(limit: int = _DEFAULT_LIMIT, page: int = 1) -> str:
+    """
+    List the site's webhooks (admin key required — the signing secret is
+    intentionally NOT shown here; use get_webhook when you need it).
+
+    Args:
+        limit: Webhooks per page (default 15, max 100).
+        page:  Page number (1-based).
+    """
+    problem = _admin_config_problem()
+    if problem:
+        return problem
+    limit = max(1, min(int(limit), 100))
+    page  = max(1, int(page))
+
+    ok, data = await _api_get(f"{ADMIN_BASE}/webhooks/",
+                              params={"limit": limit, "page": page}, admin=True)
+    if not ok:
+        return data
+    webhooks = data.get("webhooks") if isinstance(data, dict) else None
+    webhooks = webhooks if isinstance(webhooks, list) else []
+    if not webhooks:
+        return "No webhooks found."
+    meta = data.get("meta") if isinstance(data, dict) else {}
+    pag  = meta.get("pagination") if isinstance(meta, dict) else {}
+    pag  = pag if isinstance(pag, dict) else {}
+
+    lines = [f"Webhooks (page {pag.get('page', page)}/{pag.get('page_count', '?')}, "
+             f"total: {pag.get('total', '?')}):", ""]
+    for w in webhooks:
+        lines.append(f"  {w.get('event', '?')}  ->  {w.get('target_url', '?')}  "
+                     f"[{w.get('name') or '-'}]  "
+                     f"id={w.get('id') or w.get('uuid') or '?'}"
+                     + (f"  api={w.get('api_version')}" if w.get("api_version") else ""))
+    lines += ["", "Use these ids with get_webhook / update_webhook / delete_webhook."]
+    if pag.get("page_count", 1) > page:
+        lines.append(f"Use list_webhooks(page={page + 1}) for the next page.")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_READ_ANN)
+async def get_webhook(webhook_id: str) -> str:
+    """
+    Full details for ONE webhook, including its signing secret (verify
+    incoming payloads with it; treat it like a credential — never post it
+    to chat or a public place).
+
+    Args:
+        webhook_id: Webhook raw id or UUID (from list_webhooks).
+    """
+    problem = _admin_config_problem()
+    if problem:
+        return problem
+    if not webhook_id:
+        return "webhook_id is required."
+    ok, data = await _fetch_webhook(webhook_id)
+    if not ok:
+        return f"Error looking up webhook '{webhook_id}': {data}"
+    w = _first_item(data, "webhooks")
+    if not w:
+        return f"Webhook '{webhook_id}' not found (raw id or UUID from list_webhooks)."
+
+    lines = [
+        "=" * 64,
+        f"Webhook: {w.get('name') or w.get('event', '?')}  (id={w.get('uuid', '?')})",
+        "=" * 64,
+        f"Event       : {w.get('event', '?')}",
+        f"Target URL  : {w.get('target_url', '?')}",
+        f"API version : {w.get('api_version') or 'default (v5)'}",
+        f"Integration : {w.get('integration_id') or '-'}",
+        f"Created     : {w.get('created_at', '?')}",
+        f"Updated     : {w.get('updated_at', '?')}",
+    ]
+    secret = w.get("secret")
+    if secret:
+        lines.append(f"Secret      : {secret}   <- use for HMAC verification; treat like a credential")
+    else:
+        lines.append("Secret      : (not returned by the API — only the create response shows it)")
+    lines.append("")
+    lines.append("Use this id with update_webhook / delete_webhook.")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=_WRITE_ANN)
+async def create_webhook(
+    event: str,
+    target_url: str,
+    name: str = "",
+    secret: str = "",
+    api_version: str = "",
+    integration_id: str = "",
+) -> str:
+    """
+    Create a new webhook.
+
+    IMPORTANT: Confirm the event + target URL with the user before
+    calling — the webhook will POST to that URL on every matching event.
+
+    Args:
+        event:           Webhook event, e.g. 'post.published', 'post.added',
+                         'post.edited', 'post.deleted', 'page.published',
+                         'member.signed_up', 'member.deleted',
+                         'member.subscription.created',
+                         'member.subscription.edited'.
+        target_url:      URL that receives the webhook POSTs.
+        name:            Optional friendly name.
+        secret:          Signing secret (omit = Ghost generates one — it is
+                         shown ONCE in the response below, so store it).
+        api_version:     'v5' (default) or 'v4' — which API version the
+                         payload follows.
+        integration_id:  Only needed for user-authenticated webhooks (an
+                         admin key does not need it).
+    """
+    if not event.strip():
+        return "event is required."
+    url = target_url.strip()
+    if not url or not url.lower().startswith(("http://", "https://")):
+        return "target_url must be a full http(s) URL."
+    payload = {"event": event.strip(), "target_url": url}
+    if name.strip():
+        payload["name"] = name.strip()
+    if secret.strip():
+        payload["secret"] = secret.strip()
+    if api_version.strip():
+        payload["api_version"] = api_version.strip()
+    if integration_id.strip():
+        payload["integration_id"] = integration_id.strip()
+
+    ok, data = await _api_post(f"{ADMIN_BASE}/webhooks/", {"webhooks": [payload]})
+    if not ok:
+        return data
+    created = _first_item(data, "webhooks") or {}
+    result = (f"Webhook created: {created.get('event', event)} -> {url} "
+              f"(id={created.get('id') or created.get('uuid') or '?'})")
+    sec = created.get("secret")
+    if sec:
+        result += f"\nSecret (shown once — store it now): {sec}"
+    return result
+
+
+@mcp.tool(annotations=_WRITE_ANN)
+async def update_webhook(
+    webhook_id: str,
+    event: str = "",
+    target_url: str = "",
+    name: str = "",
+    api_version: str = "",
+) -> str:
+    """
+    Update an existing webhook — the signing secret CANNOT be changed,
+    only the event, target URL, name, and API version. Omit a field to
+    leave it unchanged.
+
+    IMPORTANT: Confirm with the user before calling — the new target URL
+    receives the webhook POSTs immediately.
+
+    Args:
+        webhook_id: Webhook raw id or UUID (from list_webhooks).
+        event:      New event.
+        target_url: New URL.
+        name:       New name.
+        api_version: 'v5' or 'v4'.
+    """
+    if not webhook_id:
+        return "webhook_id is required."
+    payload = {}
+    if event.strip():
+        payload["event"] = event.strip()
+    if target_url.strip():
+        payload["target_url"] = target_url.strip()
+    if name.strip():
+        payload["name"] = name.strip()
+    if api_version.strip():
+        payload["api_version"] = api_version.strip()
+    if not payload:
+        return "Nothing to update — provide event, target_url, name, and/or api_version."
+
+    ok, raw_id = await _resolve_webhook_id(webhook_id)
+    if not ok:
+        return f"Error resolving webhook '{webhook_id}': {raw_id}"
+    ok, data = await _api_post(f"{ADMIN_BASE}/webhooks/{raw_id}/", {"webhooks": [payload]},
+                               method="PUT")
+    if not ok:
+        return data
+    updated = _first_item(data, "webhooks") or {}
+    return (f"Webhook updated: {updated.get('event', '?')} -> {updated.get('target_url', '?')} "
+            f"(id={updated.get('id') or webhook_id}).")
+
+
+@mcp.tool(annotations=_DELETE_ANN)
+async def delete_webhook(webhook_id: str) -> str:
+    """
+    Permanently delete a webhook. This cannot be undone — the target stops
+    receiving events.
+
+    IMPORTANT: Confirm the webhook and the deletion with the user before
+    calling.
+
+    Args:
+        webhook_id: Webhook raw id or UUID (from list_webhooks).
+    """
+    if not webhook_id:
+        return "webhook_id is required."
+    denied = _delete_gate()
+    if denied:
+        return denied
+    ok, raw_id = await _resolve_webhook_id(webhook_id)
+    if not ok:
+        return f"Error resolving webhook '{webhook_id}': {raw_id}"
+    ok, data = await _api_delete(f"{ADMIN_BASE}/webhooks/{raw_id}/")
+    if not ok:
+        return data
+    return f"Webhook deleted (id={webhook_id}). This cannot be undone."
+
+
+# ===========================================================================
+# PROMPTS (MCP prompts — model-side helpers, listed via list_prompts)
+# ===========================================================================
+
+@mcp.prompt()
+async def summarize_post(post_id: str):
+    """
+    Load a Ghost post and ask the model to summarize it. Takes the post
+    id, UUID, or slug (the same identifiers get_post accepts).
+    """
+    admin = _mode() == "admin"
+    base  = ADMIN_BASE if admin else CONTENT_BASE
+    ok, data = await _fetch_item(base, "posts", post_id, admin,
+                                 formats="html" if admin else None)
+    if not ok:
+        return [{"role": "user",
+                 "content": f"Could not load post '{post_id}': {data}"}]
+    post = _first_item(data, "posts")
+    if not post:
+        return [{"role": "user",
+                 "content": f"Post '{post_id}' not found."}]
+    excerpt = _truncate(
+        _strip_html(post.get("custom_excerpt") or post.get("excerpt") or ""), 300)
+    body = _truncate(_strip_html(post.get("html")), 3000)
+    content = (
+        "Summarize the following Ghost post in 3-5 sentences, then list the "
+        "key points as bullets.\n\n"
+        f"Title: {post.get('title', '(untitled)')}\n"
+        f"Excerpt: {excerpt or '-'}\n"
+        f"Content preview (first 3000 chars):\n{body}"
+    )
+    return [{"role": "user", "content": content}]
+
+
+@mcp.prompt()
+def newsletter_draft(topic: str, key_points: list | None = None):
+    """
+    Prime the model to draft a Ghost-compatible HTML post on a topic, for
+    creating as a DRAFT via create_post(html=...). Takes the topic and
+    optional key points to cover.
+    """
+    points = "\n".join(f"- {k.strip()}" for k in (key_points or []) if k and k.strip()) \
+        or "- (none given — choose sensible ones from the topic)"
+    return [
+        {"role": "system",
+         "content": (
+             "You are drafting a blog post for a Ghost site. Write the body as "
+             "clean Ghost-compatible HTML: <h2> section headings, <p> paragraphs, "
+             "<ul>/<ol> lists, <strong>/<em> emphasis, <blockquote> pull quotes. "
+             "No <script> tags, no inline event handlers. Keep it 300-600 words "
+             "unless told otherwise. Output ONLY the HTML, nothing else.")},
+        {"role": "user",
+         "content": (
+             f"Draft a post on the topic: {topic}\n\n"
+             f"Key points to cover:\n{points}\n\n"
+             "After drafting, show the HTML to the user for approval, then create "
+             "it as a DRAFT with create_post(html=...) — never publish without "
+             "the user's confirmation.")},
+    ]
+
+
+
+# ===========================================================================
 # Entry point
 # ===========================================================================
 def _token_auth(app):

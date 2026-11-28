@@ -8,7 +8,7 @@
   <img src="https://img.shields.io/badge/MCP-stdio%20%C2%B7%20streamable--http%20%C2%B7%20sse-8B5CF6" alt="MCP transports" />
   <img src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+" />
   <img src="https://img.shields.io/badge/Ghost-Admin%20%2B%20Content%20API-FF5A00" alt="Ghost Admin + Content API" />
-  <img src="https://img.shields.io/badge/tools-9%20read%20%C2%B7%2010%20write-FF5A00" alt="19 tools" />
+  <img src="https://img.shields.io/badge/tools-19%20read%20%C2%B7%2025%20write-FF5A00" alt="44 tools" />
 </p>
 
 <p align="center">
@@ -28,8 +28,9 @@
 
 - **Context-safe listing** — compact one-line tables (date, status, title, tags, author) for posts, pages, tags, and authors. No bodies in list output, so agents can triage the whole site without context overflow.
 - **On-demand detail fetching** — metadata plus a truncated body preview via `get_post()`/`get_page()`, or the full body via `get_post_content()`/`get_page_content()` (the Lexical document parsed to readable text, or raw HTML).
-- **Full mode with an admin key** — create, update, publish/schedule, and delete posts, pages, and tags through the Ghost Admin API.
-- **Read-only mode with a content key** — every read tool works with just a Content API key; write tools then report that `GHOST_ADMIN_KEY` is required. No admin key needed to let an agent read your blog.
+- **Full mode with an admin key** — create, update, publish/schedule, and delete posts, pages, and tags through the Ghost Admin API, plus full management of newsletters, membership tiers, offers, members, and webhooks.
+- **Read-only mode with a content key** — the post/page read tools work with just a Content API key; the five admin-only groups (newsletters, tiers, offers, members, webhooks) have no Content API surface, and write tools then report that `GHOST_ADMIN_KEY` is required. No admin key needed to let an agent read your blog's posts and pages.
+- **Two MCP prompts** — `summarize_post` (load a post and ask the model to summarize it) and `newsletter_draft` (prime the model to draft a Ghost-compatible HTML post, created as a draft after your approval).
 - **Stdlib-only admin auth** — the Admin API's HS256 JWT is built with `hmac`/`base64`/`json`; no extra `jwt` dependency.
 - **Draft → confirm pattern** — every write tool's docstring asks the agent to confirm with the user first; posts and pages are live the moment they publish.
 - **Connection check** — verify credentials and connectivity, and report which auth mode (admin / content-only / unconfigured) the server is running in. In admin mode the key must pass an auth-required probe, so a broken admin key fails loudly.
@@ -52,6 +53,16 @@
 | `get_page_content` | The FULL body of one static page, on demand — `lexical` (the Lexical document parsed to readable plain text, default) or `html` (raw). Custom HTML blocks are visible here. |
 | `list_tags` | All tags with post/page counts where the API provides them (counts are admin-mode only). |
 | `list_authors` | The site's authors — admin `/users/` in full mode, content `/authors/` in read-only mode. |
+| `list_newsletters` | The site's newsletters with subscriber counts (admin-only — no Content API surface). |
+| `get_newsletter` | Full metadata for one newsletter by id, UUID, or slug. |
+| `list_tiers` | Membership tiers with prices (wire cents converted to display) and member counts (admin-only). |
+| `get_tier` | Full metadata for one tier by id, UUID, or slug. |
+| `list_offers` | Membership offers/discounts with the tier name and a plain-language discount label (admin-only). |
+| `get_offer` | Full metadata for one offer by id, UUID, or offer CODE. |
+| `list_members` | Newsletter members with labels and status; filter by label or free/paid (admin-only). |
+| `get_member` | Full details for one member by EMAIL, id, or UUID. |
+| `list_webhooks` | The site's webhooks — event, target URL, name. The signing secret is intentionally NOT shown here (admin-only). |
+| `get_webhook` | Full details for one webhook by raw id or UUID, including the signing secret (treat it like a credential). |
 
 ### Write Tools (admin key required)
 
@@ -67,9 +78,31 @@
 | `create_tag` | Create a tag (name required; slug/description optional). |
 | `update_tag` | Update a tag's name, slug, and/or description. |
 | `delete_tag` | Permanently delete a tag. |
+| `create_newsletter` | Create a newsletter (name required; sender reply-to, status, header/feature-image/badge toggles, fonts optional). |
+| `update_newsletter` | Update a newsletter — omit a field to leave it unchanged. |
+| `delete_newsletter` | Permanently delete a newsletter (the site's default newsletter cannot be deleted). |
+| `create_tier` | Create a membership tier — prices in cents as strings (`"1000"` = $10.00), benefits list optional. |
+| `update_tier` | Update a tier — omit to keep, `benefits=[]` to clear, `monthly_price="0"` for free. |
+| `delete_tier` | Permanently delete a tier (tiers with active paid subscriptions may be rejected). |
+| `create_offer` | Create an offer for a tier — type percent/amount/one_time/tier_free_trial/tier_discount, amount, cadence, duration, redeemable code. |
+| `update_offer` | Update an offer's name, code, or display fields (to change the discount itself: delete and recreate). |
+| `delete_offer` | Permanently delete an offer — members holding the code lose the discount. |
+| `create_member` | Sign a member up (email required; name, note, labels, newsletter subscriptions optional). |
+| `update_member` | Update a member — labels/newsletters REPLACED (omit = unchanged, `[]` = clear). A member's email cannot be changed. |
+| `delete_member` | Remove (unsubscribe) a member — this cannot be undone. |
+| `create_webhook` | Create a webhook for a Ghost event (event + target URL required; secret omitted = Ghost generates one, shown once). |
+| `update_webhook` | Update a webhook's event, target URL, name, or API version (the signing secret cannot be changed). |
+| `delete_webhook` | Permanently delete a webhook. |
 
 All write tools require `GHOST_ADMIN_KEY` — in read-only mode they return a clear configuration error naming it.
 Each tool's docstring asks the agent to confirm with the user first; published posts and pages are live immediately.
+
+### Prompts
+
+| Prompt | What it does |
+|---|---|
+| `summarize_post(post_id)` | Loads the post (id, UUID, or slug) and returns a ready-to-send instruction asking the model to summarize it in 3-5 sentences, with the key points as bullets. |
+| `newsletter_draft(topic, key_points)` | Primes the model to write a 300-600-word body as clean Ghost-compatible HTML (h2/p/ul/ol/strong/em/blockquote, no script tags), to be shown to the user and created as a DRAFT via `create_post` — never published without confirmation. |
 
 ---
 
@@ -224,7 +257,7 @@ access to a live blog. Treat the endpoint like an admin panel:
   password.
 - **Credentials in `.env`.** The compose example reads `env_file: .env`
   (gitignored). Never commit real keys to the compose file or the repo.
-- **Destructive tools off by default.** `delete_post` / `delete_page` / `delete_tag` refuse to run unless `GHOST_ALLOW_DELETE=1` is set. Every tool also advertises `readOnlyHint` / `destructiveHint` annotations so MCP clients can gate, confirm, or prompt natively.
+- **Destructive tools off by default.** every `delete_*` tool (posts, pages, tags, newsletters, tiers, offers, members, webhooks) refuses to run unless `GHOST_ALLOW_DELETE=1` is set. Every tool also advertises `readOnlyHint` / `destructiveHint` annotations so MCP clients can gate, confirm, or prompt natively.
 - **No key leakage.** Keys are never logged or echoed, and error output
   never includes request URLs with query params (the Content API key
   rides in the query string).
@@ -237,7 +270,7 @@ access to a live blog. Treat the endpoint like an admin panel:
 |---|---|---|
 | `GHOST_URL` | ✅ | Your Ghost site URL, e.g. `https://your-ghost-site.example` (a trailing `/` is fine — it is stripped in code). |
 | `GHOST_ADMIN_KEY` | ✅ for writes | Admin API key, format `<key id>:<64-char-hex-secret>`, from Ghost admin → Integrations → Admin API. Enables full read/write mode. Never logged. |
-| `GHOST_ALLOW_DELETE` | — | Set to `1` to enable the destructive tools (`delete_post`, `delete_page`, `delete_tag`). They are disabled by default and refuse to run until it is set. |
+| `GHOST_ALLOW_DELETE` | — | Set to `1` to enable the destructive tools (`delete_post`, `delete_page`, `delete_tag`, and the group deletes). They are disabled by default and refuse to run until it is set. |
 | `GHOST_CONTENT_KEY` | — | Content API key, from Ghost admin → Integrations → Content API. With no admin key set, the server runs in **read-only mode**. Never logged. |
 | `MCP_TRANSPORT` | — | `streamable-http`, `sse`, or `stdio` (default: `stdio`) |
 | `PORT` | — | Port to bind on for HTTP transports (default: `8000`) |

@@ -5,11 +5,20 @@ connects AI agents to a Ghost blog. It speaks to the Ghost **Admin API** (JWT au
 read + write) and the Ghost **Content API** (query-key auth, read-only fallback).
 All server logic lives in `ghost_blog_mcp.py` — there is no package structure or lint config. A mocked-HTTP test suite lives in `tests/`.
 
-The server exposes 19 tools: 9 read (`check_connection`, `list_posts`, `get_post`,
+The server exposes 44 tools: 19 read (`check_connection`, `list_posts`, `get_post`,
 `get_post_content`, `list_pages`, `get_page`, `get_page_content`, `list_tags`,
-`list_authors`) and 10
-write (`create_post`, `update_post`, `set_post_status`, `delete_post`, `create_page`,
-`update_page`, `delete_page`, `create_tag`, `update_tag`, `delete_tag`).
+`list_authors`, plus `list_`/`get_` for the five admin-only groups below) and 25 write
+(`create_post`, `update_post`, `set_post_status`, `delete_post`, `create_page`,
+`update_page`, `delete_page`, `create_tag`, `update_tag`, `delete_tag`, plus
+`create_`/`update_`/`delete_` for the same five groups), served with two MCP prompts
+(`summarize_post`, `newsletter_draft`).
+
+The five admin-only groups — newsletters, tiers, offers, members, webhooks — have NO
+Content API surface: in content-key mode their read tools return the
+`GHOST_ADMIN_KEY` configuration error instead of falling back like posts/pages.
+Offers resolve by raw id, UUID, or `code`; members by raw id, UUID, or `email`;
+webhooks by raw id or UUID only (webhook list/get go beyond the MFYDev-ported
+surface of add/edit/delete).
 
 Auth modes: `GHOST_ADMIN_KEY` set = full mode (reads AND writes, reads via the Admin
 API) · only `GHOST_CONTENT_KEY` set = read-only mode (reads via the Content API; write
@@ -66,10 +75,11 @@ workspace root, with the repo in `ghost-blog-mcp/`):
    GHOST_URL=https://example.invalid GHOST_ADMIN_KEY=<fake-24-hex>:<fake-64-hex> \
      .venv/bin/python3 -c "import asyncio, sys; sys.path.insert(0, 'ghost-blog-mcp'); import ghost_blog_mcp as m; print([t.name for t in asyncio.run(m.mcp.list_tools())])"
    ```
-   Expect EXACTLY the 19 tool names above. Repeat with `GHOST_CONTENT_KEY` set and
-   `GHOST_ADMIN_KEY` unset: `list_tools` still returns 18, and the write path's
-   configuration check (`_admin_config_problem()`) reports `GHOST_ADMIN_KEY` as
-   missing.
+   Expect EXACTLY the 44 tool names above. Repeat with `GHOST_CONTENT_KEY` set and
+   `GHOST_ADMIN_KEY` unset: `list_tools` still returns all 44 (tools register
+   unconditionally — the auth mode changes behavior, not registration), and the
+   admin-only groups' configuration check (`_admin_config_problem()`) reports
+   `GHOST_ADMIN_KEY` as missing when their tools are called.
 4. JWT helper check (fake key only, stdlib script): sign with `_admin_jwt()`,
    base64-decode the header and payload, assert header
    `{alg: HS256, typ: JWT, kid: <fake id>}` and payload
@@ -83,7 +93,7 @@ workspace root, with the repo in `ghost-blog-mcp/`):
 6. Auth smoke (when touching the entry point or `_token_auth`): start
    with `MCP_TRANSPORT=streamable-http PORT=8991 MCP_AUTH_TOKEN=<fake>
    GHOST_URL=... GHOST_ADMIN_KEY=<fake>` -> an MCP client without the
-   token gets `401`; with `Authorization: Bearer <fake>` it lists all 18
+   token gets `401`; with `Authorization: Bearer <fake>` it lists all 44
    tools. Then `HOST=0.0.0.0` with no token -> the process exits at
    start with the refusal message.
 
@@ -131,7 +141,8 @@ about local verification — the image build is not a behavior check.
 ## Ghost API reference
 
 - Admin base: `{GHOST_URL}/ghost/api/admin/` — `/posts/`, `/pages/`, `/tags/`,
-  `/users/`, `/site/`. Auth: `Authorization: Ghost <JWT>` + `Accept-Version: v6.0`.
+  `/users/`, `/site/`, `/newsletters/`, `/tiers/`, `/offers/`, `/members/`,
+  `/webhooks/`. Auth: `Authorization: Ghost <JWT>` + `Accept-Version: v6.0`.
 - Content base: `{GHOST_URL}/ghost/api/content/` — `/posts/`, `/posts/slug/{slug}/`,
   `/pages/`, `/pages/slug/{slug}/`, `/tags/`, `/authors/`, `/settings/`. Auth:
   `?key=<content key>` query param + `Accept-Version: v6.0`.
@@ -180,6 +191,14 @@ about local verification — the image build is not a behavior check.
   path 404s through the `users/:id` route (live-verified 11-24).
 - `/images/` is deliberately not exposed (YAGNI for a blog MCP).
 
+- The five new endpoints (`/newsletters/`, `/tiers/`, `/offers/`, `/members/`,
+  `/webhooks/`) are Admin-API-only — there is no Content API surface for them, so
+  their tools return the `GHOST_ADMIN_KEY` config error in content-key mode instead
+  of falling back like posts/pages.
+- Tier prices ride the wire as CENTS STRINGS (`monthly_price: "1000"` = $10.00) —
+  keep them strings on create/update; `offer.amount` is a NUMBER (the percent value
+  for percent offers, cents for money offers, 0 for a free trial).
+
 ## Tool guidance (for agents consuming this server)
 
 Recommended workflow:
@@ -217,6 +236,10 @@ Recommended workflow:
 ## Changelog
 
 ### Unreleased
+
+- **New:** 25 tools for the five admin-only groups — `list_`/`get_`/`create_`/`update_`/`delete_` for newsletters, tiers, offers, members, and webhooks. Offers resolve by code, members by email, webhooks by raw id/UUID only; webhook `list_`/`get_` go beyond the MFYDev-ported surface. All five groups are Admin-API-only — content-key mode returns the `GHOST_ADMIN_KEY` config error (there is no Content API surface). The five new deletes ride the existing `GHOST_ALLOW_DELETE` gate.
+- **New:** two MCP prompts — `summarize_post` (fetch a post, ask the model to summarize it) and `newsletter_draft` (prime the model to draft Ghost-compatible HTML, created as a DRAFT via `create_post`).
+- **Docs:** README tool tables cover the five new groups + a Prompts section; the stale "18 tools in content-key mode" gate wording in this file is fixed (44 tools register in every mode).
 - **New:** `get_page_content` — the full body of one page on demand (the Lexical document parsed to readable text, or raw HTML), mirroring `get_post_content`. Pages now have the same see-half as posts, custom HTML blocks included (19 tools: 9 read, 10 write).
 - **Fix:** `check_connection` in admin mode proves the key against an auth-required endpoint (`GET /users/` — Ghost 6 has no `/users/me/`; that path 404s through the `users/:id` route) — `GET /site/` is public on Ghost 6, so a broken admin key reported green before. Malformed keys (missing parts, non-hex secret) fail cleanly with no network round trip.
 - **Fix:** `get_post_content` requests `formats=html` in admin mode even for the `lexical` format — the no-lexical fallback (legacy HTML-only content) returned empty text before because the Admin API omits `html` unless asked.
